@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.DS_Store
+# CSVs de teste com e-mails reais ficam só local
+*.local.csv
