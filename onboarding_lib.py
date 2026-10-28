@@ -270,7 +270,8 @@ def _with_tag(custom_tags, key, value):
 
 
 def ensure_warehouse(do, nome, grupo, tag_key, tag_value, cfg, aplicar):
-    """cfg: tamanho, tipo, min_clusters, max_clusters, auto_stop_min (só usados ao criar)."""
+    """cfg: tamanho, min_clusters, max_clusters, auto_stop_min (só usados ao criar).
+    O warehouse é sempre serverless (que exige o tipo PRO)."""
     whs = do("GET", "/api/2.0/sql/warehouses").get("warehouses", [])
     found = next((w for w in whs if w["name"] == nome), None)
     tag = f"{tag_key}={tag_value}"
@@ -280,7 +281,7 @@ def ensure_warehouse(do, nome, grupo, tag_key, tag_value, cfg, aplicar):
         wid = do("POST", "/api/2.0/sql/warehouses", {
             "name": nome, "cluster_size": cfg["tamanho"], "min_num_clusters": cfg["min_clusters"],
             "max_num_clusters": cfg["max_clusters"], "auto_stop_mins": cfg["auto_stop_min"],
-            "enable_serverless_compute": True, "warehouse_type": cfg["tipo"],
+            "enable_serverless_compute": True, "warehouse_type": "PRO",
             "tags": {"custom_tags": [{"key": tag_key, "value": tag_value}]},
         })["id"]
         status = "criado"

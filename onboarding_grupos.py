@@ -46,8 +46,8 @@ CONFIG = {
     "acessos_workspace": ["WORKSPACE_ACCESS", "DATABRICKS_SQL_ACCESS"],
     # Tag de custo aplicada ao warehouse e aos model services (o valor vem da coluna budget do CSV)
     "tag_custo": "budget",
-    # SQL warehouse criado para a área (só vale na criação; warehouses existentes não são reconfigurados)
-    "warehouse": {"padrao": "wh_experimentacao", "tamanho": "2X-Small", "tipo": "PRO",
+    # SQL warehouse criado para a área — sempre serverless (só vale na criação; existentes não são reconfigurados)
+    "warehouse": {"padrao": "wh_experimentacao", "tamanho": "2X-Small",
                   "min_clusters": 1, "max_clusters": 3, "auto_stop_min": 5},
     # Etapa 4: além do zero, obrigar todo acesso a modelos a passar pelo Unity Gateway
     # (bloqueia os endpoints legados /serving-endpoints/databricks-*)

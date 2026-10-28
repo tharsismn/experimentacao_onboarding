@@ -50,7 +50,7 @@ Não há script de instalação nem job agendado: o notebook é executado manual
 | `privilegios_catalogo` | `USE_CATALOG` | Privilégios do grupo no catálogo |
 | `acessos_workspace` | `WORKSPACE_ACCESS`, `DATABRICKS_SQL_ACCESS` | O que o grupo usa no workspace |
 | `tag_custo` | `budget` | Chave da tag de custo (warehouse e model services) |
-| `warehouse` | 2X-Small, PRO, 1–3 clusters, auto-stop 5 min | Warehouse criado para a área (só na criação) |
+| `warehouse` | 2X-Small, 1–3 clusters, auto-stop 5 min | Warehouse criado para a área — sempre **serverless** (só na criação) |
 | `ligar_enforce_gateway` | `True` | Etapa 4 liga `enforce_ai_gateway_v3_only` (bloqueia endpoints legados) |
 | `audit_dias` | `30` | Janela de busca das usage policies no audit log (etapa 6) |
 

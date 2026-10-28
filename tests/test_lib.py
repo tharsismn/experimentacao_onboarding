@@ -6,7 +6,7 @@ import onboarding_lib as lib
 D = "wh_padrao"
 PRIV = ["USE_SCHEMA", "SELECT", "MODIFY", "CREATE_TABLE", "CREATE_FUNCTION", "CREATE_MATERIALIZED_VIEW", "EXECUTE", "REFRESH"]
 ENT = ["WORKSPACE_ACCESS", "DATABRICKS_SQL_ACCESS"]
-WH = {"tamanho": "2X-Small", "tipo": "PRO", "min_clusters": 1, "max_clusters": 3, "auto_stop_min": 5}
+WH = {"tamanho": "2X-Small", "min_clusters": 1, "max_clusters": 3, "auto_stop_min": 5}
 
 
 class FakeApi:
@@ -276,6 +276,15 @@ class TestSetting(unittest.TestCase):
         self.assertEqual(lib.ensure_bool_setting(api, "x", True, False)[0], "atualizaria")
         self.assertEqual(lib.ensure_bool_setting(api, "x", True, True)[0], "atualizado")
         self.assertEqual(calls[-1][2], {"name": "x", "boolean_val": {"value": True}})
+
+
+class TestWarehouseServerless(unittest.TestCase):
+    def test_cria_sempre_serverless_pro(self):
+        api = FakeApi()
+        lib.ensure_warehouse(api, "wh", "g", "budget", "fin", WH, True)
+        body = [c[2] for c in api.calls if c[0] == "POST" and c[1] == "/api/2.0/sql/warehouses"][0]
+        self.assertEqual((body["enable_serverless_compute"], body["warehouse_type"]), (True, "PRO"))
+        self.assertEqual((body["max_num_clusters"], body["auto_stop_mins"]), (3, 5))
 
 
 class TestAssignment(unittest.TestCase):
