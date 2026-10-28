@@ -3,7 +3,10 @@ from urllib.parse import unquote
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import onboarding_lib as lib
 
-D = {"warehouse_padrao": "wh_padrao"}
+D = "wh_padrao"
+PRIV = ["USE_SCHEMA", "SELECT", "MODIFY", "CREATE_TABLE", "CREATE_FUNCTION", "CREATE_MATERIALIZED_VIEW", "EXECUTE", "REFRESH"]
+ENT = ["WORKSPACE_ACCESS", "DATABRICKS_SQL_ACCESS"]
+WH = {"tamanho": "2X-Small", "tipo": "PRO", "min_clusters": 1, "max_clusters": 3, "auto_stop_min": 5}
 
 
 class FakeApi:
@@ -135,9 +138,9 @@ class TestEtapas(unittest.TestCase):
         lib.ensure_group(api, "g", False)
         lib.ensure_user(api, "a@x.com", False)
         lib.ensure_member(api, None, None, False)
-        lib.ensure_workspace_assignment(api, None, False)
-        lib.ensure_schema(api, "cat", "s", "g", "adm", False)
-        lib.ensure_warehouse(api, "wh", "g", "fin", {}, False)
+        lib.ensure_workspace_assignment(api, None, ENT, False)
+        lib.ensure_schema(api, "cat", "s", "g", "adm", PRIV, ["USE_CATALOG"], False)
+        lib.ensure_warehouse(api, "wh", "g", "budget", "fin", WH, False)
         lib.ensure_model_service(api, "cat", "s", "g", "m", "models/x", 1, 1, False)
         self.assertEqual(api.writes(), [])
 
@@ -147,12 +150,12 @@ class TestEtapas(unittest.TestCase):
         self.assertEqual(lib.ensure_user(api, "ana.silva@x.com", True), ("criado", "202"))
         body = [c[2] for c in api.calls if c[1] == "/api/2.0/identity/users"][0]
         self.assertEqual(body["full_name"], {"given_name": "Ana", "family_name": "Silva"})
-        self.assertEqual(lib.ensure_workspace_assignment(api, "101", True)[0], "criado")
-        self.assertEqual(lib.ensure_schema(api, "cat", "s", "g", "adm", True)[0], "criado")
+        self.assertEqual(lib.ensure_workspace_assignment(api, "101", ENT, True)[0], "criado")
+        self.assertEqual(lib.ensure_schema(api, "cat", "s", "g", "adm", PRIV, ["USE_CATALOG"], True)[0], "criado")
         grants = [c for c in api.calls if c[0] == "PATCH" and "/permissions/schema/" in c[1]][0][2]
-        self.assertEqual(grants["changes"][0]["add"], lib.SCHEMA_PRIVILEGES)
+        self.assertEqual(grants["changes"][0]["add"], PRIV)
         self.assertNotIn("CREATE_VOLUME", grants["changes"][0]["add"])
-        self.assertEqual(lib.ensure_warehouse(api, "wh", "g", "fin", {"warehouse_tamanho": "2X-Small", "warehouse_max_clusters": 1, "warehouse_auto_stop": 10}, True)[0], "criado")
+        self.assertEqual(lib.ensure_warehouse(api, "wh", "g", "budget", "fin", WH, True)[0], "criado")
         self.assertEqual(lib.ensure_model_service(api, "cat", "s", "g", "gpt-5-mini", "models/x", 100, 5, True)[0], "criado")
         self.assertTrue(any("/permissions/model_service/cat.s.genai_gpt_5_mini" in c[1] for c in api.calls))
 
@@ -162,9 +165,9 @@ class TestEtapas(unittest.TestCase):
                       services={"cat.s.genai_m"})
         self.assertEqual(lib.ensure_group(api, "g", True), ("existe", "1"))
         self.assertEqual(lib.ensure_user(api, "a@x.com", True), ("existe", "2"))
-        self.assertEqual(lib.ensure_workspace_assignment(api, "1", True)[0], "existe")
-        self.assertEqual(lib.ensure_schema(api, "cat", "s", "g", "", True)[0], "existe")
-        self.assertEqual(lib.ensure_warehouse(api, "wh", "g", "fin", {}, True)[0], "existe")
+        self.assertEqual(lib.ensure_workspace_assignment(api, "1", ENT, True)[0], "existe")
+        self.assertEqual(lib.ensure_schema(api, "cat", "s", "g", "", PRIV, ["USE_CATALOG"], True)[0], "existe")
+        self.assertEqual(lib.ensure_warehouse(api, "wh", "g", "budget", "fin", WH, True)[0], "existe")
         self.assertEqual(lib.ensure_model_service(api, "cat", "s", "g", "m", "models/x", 1, 1, True)[0], "atualizado")
         posts = [c for c in api.writes() if c[0] == "POST"]
         self.assertEqual(posts, [])
@@ -246,8 +249,8 @@ class TestWarehouseTag(unittest.TestCase):
         wh = {"name": "wh", "id": "w1", "cluster_size": "2X-Small", "auto_stop_mins": 10,
               "tags": {"custom_tags": [{"key": "grupo", "value": "x"}, {"key": "budget", "value": "antigo"}]}}
         api = FakeApi(warehouses=[wh])
-        self.assertEqual(lib.ensure_warehouse(api, "wh", "g", "fin", {}, False)[0], "atualizaria")
-        self.assertEqual(lib.ensure_warehouse(api, "wh", "g", "fin", {}, True)[0], "atualizado")
+        self.assertEqual(lib.ensure_warehouse(api, "wh", "g", "budget", "fin", WH, False)[0], "atualizaria")
+        self.assertEqual(lib.ensure_warehouse(api, "wh", "g", "budget", "fin", WH, True)[0], "atualizado")
         body = [c for c in api.calls if c[1].endswith("/edit")][0][2]
         self.assertEqual(body["cluster_size"], "2X-Small")
         self.assertEqual(body["tags"]["custom_tags"], [{"key": "grupo", "value": "x"}, {"key": "budget", "value": "fin"}])
@@ -268,11 +271,50 @@ class TestSetting(unittest.TestCase):
 
     def test_setting(self):
         api, calls = self._api(True)
-        self.assertEqual(lib.ensure_bool_setting(api, "x", True, True)[0], "sem mudança")
+        self.assertEqual(lib.ensure_bool_setting(api, "x", True, True)[0], "existe")
         api, calls = self._api(False)
-        self.assertEqual(lib.ensure_bool_setting(api, "x", True, False)[0], "alteraria")
-        self.assertEqual(lib.ensure_bool_setting(api, "x", True, True)[0], "alterado")
+        self.assertEqual(lib.ensure_bool_setting(api, "x", True, False)[0], "atualizaria")
+        self.assertEqual(lib.ensure_bool_setting(api, "x", True, True)[0], "atualizado")
         self.assertEqual(calls[-1][2], {"name": "x", "boolean_val": {"value": True}})
+
+
+class TestAssignment(unittest.TestCase):
+    def test_ja_atribuido_na_criacao_conta_como_existe(self):
+        def api(m, p, b=None):
+            if m == "GET":
+                raise lib.ApiError("not directly assigned", status=404)
+            raise lib.ApiError("Principal 1 is already assigned to workspace 2.")
+        self.assertEqual(lib.ensure_workspace_assignment(api, "1", ENT, True)[0], "existe")
+
+
+class TestSystemAi(unittest.TestCase):
+    def _api(self):
+        calls = []
+        def api(m, p, b=None):
+            calls.append((m, p, b))
+            return {}
+        return api, calls
+
+    def test_zerar_simular_aplicar_e_idempotente(self):
+        servicos = {"a": {"rate_limits": []}, "b": {"rate_limits": lib.ZERO_LIMITS}}
+        api, calls = self._api()
+        self.assertEqual([r[1] for r in lib.apply_system_ai(api, servicos, "zerar", False)], ["atualizaria", "existe"])
+        self.assertEqual(calls, [])
+        self.assertEqual([r[1] for r in lib.apply_system_ai(api, servicos, "zerar", True)], ["atualizado", "existe"])
+        self.assertEqual(len(calls), 1)
+
+    def test_remover_zero_preserva_outros(self):
+        outro = {"key": "RATE_LIMIT_KEY_SERVICE", "tokens": 5}
+        servicos = {"a": {"rate_limits": lib.ZERO_LIMITS + [outro]}, "b": {"rate_limits": []}}
+        api, calls = self._api()
+        self.assertEqual([r[1] for r in lib.apply_system_ai(api, servicos, "remover_zero", True)], ["atualizado", "existe"])
+        self.assertEqual(calls[0][2]["config"]["rate_limits"], [outro])
+
+    def test_manage(self):
+        def api(m, p, b=None):
+            return {"privilege_assignments": [{"principal": "eu", "privileges": ["MANAGE"]}]} if m == "GET" else {}
+        self.assertEqual(lib.grant_manage_system_ai(api, "eu", True)[0], "existe")
+        self.assertEqual(lib.grant_manage_system_ai(api, "outro", False)[0], "criaria")
 
 
 class TestTag(unittest.TestCase):

@@ -1,6 +1,8 @@
 """Onboarding de grupos — ambiente de experimentação.
 
-Funções idempotentes usadas pelos notebooks onboarding_grupos e zerar_system_ai.
+Backend do notebook onboarding_grupos: funções idempotentes que consultam antes de criar ou alterar.
+As regras do ambiente (privilégios, acessos, tag de custo, warehouse) ficam na célula de configuração
+do notebook e chegam aqui como parâmetros.
 Todas as chamadas à API passam por `do(method, path, body=None)`, que no notebook
 é o api_client do WorkspaceClient e nos testes locais é um fake.
 """
@@ -9,18 +11,12 @@ import io
 import re
 from urllib.parse import quote
 
-# Privilégios fixos do grupo no próprio schema (sem volumes).
-SCHEMA_PRIVILEGES = [
-    "USE_SCHEMA", "SELECT", "MODIFY", "CREATE_TABLE", "CREATE_FUNCTION",
-    "CREATE_MATERIALIZED_VIEW", "EXECUTE", "REFRESH",
-]
-ENTITLEMENTS = ["WORKSPACE_ACCESS", "DATABRICKS_SQL_ACCESS"]
 CSV_COLUMNS = ["grupo", "emails", "schema", "warehouse", "modelos"]
 # Opcionais: nome da usage policy (interface) · valor da tag de custo · limites do grupo por modelo
 # (tpm/qpm vazios ou 0 = sem limite — no Unity Gateway um limite 0 bloquearia o grupo inteiro)
 CSV_OPTIONAL = ["usage_policy", "budget", "tpm", "qpm"]
 POLICY_USER_ROLE = "roles/budgetPolicy.user"
-TAG_KEY = "budget"   # tag de custo padronizada; o valor separa as áreas
+SERVICE_PREFIX = "genai_"   # nome dos model services das áreas: <catálogo>.<schema>.genai_<modelo>
 
 _NAME_RE = re.compile(r"^[a-z0-9_]+$")
 _EMAIL_RE = re.compile(r"^[^@\s;,]+@[^@\s;,]+\.[^@\s;,]+$")
@@ -50,7 +46,7 @@ def _split(value):
     return [v.strip() for v in (value or "").split(";") if v.strip()]
 
 
-def parse_csv(text, defaults):
+def parse_csv(text, warehouse_padrao):
     """Lê o CSV e devolve (grupos, erros). Cada grupo é um dict normalizado."""
     reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
     missing = [c for c in CSV_COLUMNS if c not in (reader.fieldnames or [])]
@@ -70,7 +66,7 @@ def parse_csv(text, defaults):
             "grupo": g,
             "emails": emails,
             "schema": schema,
-            "warehouse": (row.get("warehouse") or "").strip() or defaults["warehouse_padrao"],
+            "warehouse": (row.get("warehouse") or "").strip() or warehouse_padrao,
             "modelos": modelos,
             "usage_policy": (row.get("usage_policy") or "").strip(),
             "budget": (row.get("budget") or "").strip() or g,
@@ -113,7 +109,7 @@ def validate_models(grupos, available):
 
 
 def service_name(modelo):
-    return "genai_" + re.sub(r"[^a-z0-9]+", "_", modelo.lower()).strip("_")
+    return SERVICE_PREFIX + re.sub(r"[^a-z0-9]+", "_", modelo.lower()).strip("_")
 
 
 # ----------------------------------------------------- pasta do notebook ----
@@ -219,7 +215,7 @@ def ensure_member(do, group_id, user_id, aplicar):
         raise
 
 
-def ensure_workspace_assignment(do, principal_id, aplicar):
+def ensure_workspace_assignment(do, principal_id, entitlements, aplicar):
     if principal_id is None:
         return "criaria", None
     try:
@@ -230,9 +226,15 @@ def ensure_workspace_assignment(do, principal_id, aplicar):
             raise
     if not aplicar:
         return "criaria", None
-    do("POST", "/api/2.0/identity/workspace-assignments",
-       {"principal_id": int(principal_id), "entitlements": ENTITLEMENTS})
-    return "criado", ", ".join(ENTITLEMENTS)
+    try:
+        do("POST", "/api/2.0/identity/workspace-assignments",
+           {"principal_id": int(principal_id), "entitlements": list(entitlements)})
+    except ApiError as e:
+        # logo após a criação, o GET pode ainda não enxergar a atribuição (propagação)
+        if _already_exists(e) or "already assigned" in str(e).lower():
+            return "existe", None
+        raise
+    return "criado", ", ".join(entitlements)
 
 
 def _grant(do, securable, full_name, principal, privileges):
@@ -240,7 +242,7 @@ def _grant(do, securable, full_name, principal, privileges):
        {"changes": [{"principal": principal, "add": privileges}]})
 
 
-def ensure_schema(do, catalogo, schema, grupo, owner, aplicar):
+def ensure_schema(do, catalogo, schema, grupo, owner, priv_schema, priv_catalogo, aplicar):
     full = f"{catalogo}.{schema}"
     status = "existe"
     try:
@@ -257,9 +259,9 @@ def ensure_schema(do, catalogo, schema, grupo, owner, aplicar):
         return status, full
     if owner:
         do("PATCH", f"/api/2.1/unity-catalog/schemas/{full}", {"owner": owner})
-    _grant(do, "catalog", catalogo, grupo, ["USE_CATALOG"])
-    _grant(do, "schema", full, grupo, SCHEMA_PRIVILEGES)
-    return status, f"{full} (owner {owner or 'executor'}; grants: {', '.join(SCHEMA_PRIVILEGES)})"
+    _grant(do, "catalog", catalogo, grupo, list(priv_catalogo))
+    _grant(do, "schema", full, grupo, list(priv_schema))
+    return status, f"{full} (owner {owner or 'executor'}; grants: {', '.join(priv_schema)})"
 
 
 def _with_tag(custom_tags, key, value):
@@ -267,32 +269,33 @@ def _with_tag(custom_tags, key, value):
     return [t for t in (custom_tags or []) if t.get("key") != key] + [{"key": key, "value": value}]
 
 
-def ensure_warehouse(do, nome, grupo, budget, cfg, aplicar):
+def ensure_warehouse(do, nome, grupo, tag_key, tag_value, cfg, aplicar):
+    """cfg: tamanho, tipo, min_clusters, max_clusters, auto_stop_min (só usados ao criar)."""
     whs = do("GET", "/api/2.0/sql/warehouses").get("warehouses", [])
     found = next((w for w in whs if w["name"] == nome), None)
-    tag = f"{TAG_KEY}={budget}"
+    tag = f"{tag_key}={tag_value}"
     if not found:
         if not aplicar:
             return "criaria", f"{nome} ({tag})"
         wid = do("POST", "/api/2.0/sql/warehouses", {
-            "name": nome, "cluster_size": cfg["warehouse_tamanho"], "min_num_clusters": 1,
-            "max_num_clusters": cfg["warehouse_max_clusters"], "auto_stop_mins": cfg["warehouse_auto_stop"],
-            "enable_serverless_compute": True, "warehouse_type": "PRO",
-            "tags": {"custom_tags": [{"key": TAG_KEY, "value": budget}]},
+            "name": nome, "cluster_size": cfg["tamanho"], "min_num_clusters": cfg["min_clusters"],
+            "max_num_clusters": cfg["max_clusters"], "auto_stop_mins": cfg["auto_stop_min"],
+            "enable_serverless_compute": True, "warehouse_type": cfg["tipo"],
+            "tags": {"custom_tags": [{"key": tag_key, "value": tag_value}]},
         })["id"]
         status = "criado"
     else:
         wid, status = found["id"], "existe"
         atual = do("GET", f"/api/2.0/sql/warehouses/{wid}")
         tags = (atual.get("tags") or {}).get("custom_tags", [])
-        if {"key": TAG_KEY, "value": budget} not in [{"key": t.get("key"), "value": t.get("value")} for t in tags]:
+        if {"key": tag_key, "value": tag_value} not in [{"key": t.get("key"), "value": t.get("value")} for t in tags]:
             if not aplicar:
                 return "atualizaria", f"{nome} ({wid}) tag {tag}"
             # edit regrava a configuração: reenvia a atual, mudando só as tags
             campos = ["name", "cluster_size", "min_num_clusters", "max_num_clusters", "auto_stop_mins",
                       "enable_serverless_compute", "warehouse_type", "spot_instance_policy", "enable_photon", "channel"]
             body = {k: atual[k] for k in campos if k in atual}
-            body["tags"] = {"custom_tags": _with_tag(tags, TAG_KEY, budget)}
+            body["tags"] = {"custom_tags": _with_tag(tags, tag_key, tag_value)}
             do("POST", f"/api/2.0/sql/warehouses/{wid}/edit", body)
             status = "atualizado"
     if aplicar:
@@ -437,11 +440,48 @@ def ensure_bool_setting(do, nome, valor, aplicar):
     atual = do("GET", f"/api/2.1/settings/{nome}")
     efetivo = ((atual.get("effective_boolean_val") or atual.get("boolean_val") or {}).get("value"))
     if efetivo == valor:
-        return "sem mudança", f"{nome} = {valor}"
+        return "existe", f"{nome} = {valor}"
     if not aplicar:
-        return "alteraria", f"{nome}: {efetivo} → {valor}"
+        return "atualizaria", f"{nome}: {efetivo} → {valor}"
     do("PATCH", f"/api/2.1/settings/{nome}", {"name": nome, "boolean_val": {"value": valor}})
-    return "alterado", f"{nome}: {efetivo} → {valor}"
+    return "atualizado", f"{nome}: {efetivo} → {valor}"
+
+
+def grant_manage_system_ai(do, principal, aplicar):
+    """MANAGE em system.ai é exigido para alterar os limites dos modelos (o metastore admin concede a si)."""
+    atual = do("GET", "/api/2.1/unity-catalog/permissions/schema/system.ai").get("privilege_assignments", [])
+    if any(a.get("principal") == principal and "MANAGE" in a.get("privileges", []) for a in atual):
+        return "existe", f"{principal} já tem MANAGE"
+    if not aplicar:
+        return "criaria", f"MANAGE p/ {principal}"
+    _grant(do, "schema", "system.ai", principal, ["MANAGE"])
+    return "criado", f"MANAGE p/ {principal}"
+
+
+def apply_system_ai(do, servicos, modo, aplicar):
+    """modo: 'zerar' (limite 0 por usuário em todos os services de system.ai, preservando outros
+    limites) ou 'remover_zero'. Devolve [(modelo, status, detalhe)]."""
+    linhas = []
+    for nome, info in sorted(servicos.items()):
+        atual = info["rate_limits"]
+        if modo == "remover_zero":
+            novo = [r for r in atual if r.get("key") != "RATE_LIMIT_KEY_USER_DEFAULT"]
+            novo = None if len(novo) == len(atual) else novo
+        else:
+            novo = zero_limits_for(atual)
+        if novo is None:
+            linhas.append((nome, "existe", "já " + ("sem zero" if modo == "remover_zero" else "zerado")))
+            continue
+        if not aplicar:
+            linhas.append((nome, "atualizaria", "remover zero" if modo == "remover_zero" else "zerar"))
+            continue
+        try:
+            do("PATCH", f"/api/2.1/unity-catalog/model-services/system.ai.{nome}?update_mask=config.rate_limits",
+               {"config": {"rate_limits": novo}})
+            linhas.append((nome, "atualizado", "zero removido" if modo == "remover_zero" else "zerado"))
+        except Exception as e:
+            linhas.append((nome, "ERRO", str(e)[:300]))
+    return linhas
 
 
 def system_ai_not_zeroed(servicos):
