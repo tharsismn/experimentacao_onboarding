@@ -75,7 +75,7 @@ def do(method, path, body=None):
 _amplos = lib.broad_access_on_folder(do, NB_DIR)
 if _amplos:
     raise Exception(f"A pasta {NB_DIR} está acessível a {', '.join(_amplos)}. Publique os notebooks "
-                    "na pasta pessoal do admin (/Workspace/Users/<admin>/...) — ver deploy.sh.")
+                    "na pasta pessoal do admin (/Workspace/Users/<admin>/...).")
 
 RESULTADO = []   # (etapa, grupo, item, status, detalhe) — acumulado pelas células 1 a 5
 
@@ -130,7 +130,8 @@ erros += lib.validate_models(GRUPOS, MODELOS_SYS)
 nao_zerados = lib.system_ai_not_zeroed(MODELOS_SYS)
 if nao_zerados:
     avisos.append(f"{len(nao_zerados)} modelo(s) de system.ai sem o zero padrão — os limites por grupo só "
-                  "funcionam com o zero aplicado. Rode o notebook zerar_system_ai.")
+                  "funcionam com o zero aplicado. Rode o notebook zerar_system_ai em modo aplicar "
+                  f"(ex.: {', '.join(nao_zerados[:5])}{'…' if len(nao_zerados) > 5 else ''}).")
 
 print(f"CSV: {CSV_PATH}")
 if erros:

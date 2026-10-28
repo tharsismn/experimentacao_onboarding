@@ -3,3 +3,5 @@ __pycache__/
 .DS_Store
 # CSVs de teste com e-mails reais ficam só local
 *.local.csv
+# script de publicação usado só nos testes locais
+*.local.sh

@@ -4,8 +4,8 @@
 # MAGIC
 # MAGIC Aplica rate limit **0 (tokens e requisições) por usuário** em todos os model services de `system.ai`,
 # MAGIC sem remover nenhum grant. Os grupos usam os model services próprios criados pelo `onboarding_grupos`,
-# MAGIC que não são afetados. Modelos novos publicados pela Databricks entram sem limite — por isso este
-# MAGIC notebook roda também como job diário.
+# MAGIC que não são afetados. Modelos novos publicados pela Databricks entram sem limite — rode este notebook
+# MAGIC de novo quando a célula 0 do `onboarding_grupos` avisar que há modelos de `system.ai` sem o zero.
 # MAGIC
 # MAGIC Em `aplicar`, também liga a configuração de workspace **`enforce_ai_gateway_v3_only`**, que bloqueia os
 # MAGIC endpoints legados `/serving-endpoints/databricks-*` (e o `ai_query` com nomes legados), forçando todo acesso
@@ -51,7 +51,7 @@ def do(method, path, body=None):
 _amplos = lib.broad_access_on_folder(do, NB_DIR)
 if _amplos:
     raise Exception(f"A pasta {NB_DIR} está acessível a {', '.join(_amplos)}. Publique os notebooks "
-                    "na pasta pessoal do admin (/Workspace/Users/<admin>/...) — ver deploy.sh.")
+                    "na pasta pessoal do admin (/Workspace/Users/<admin>/...).")
 
 # COMMAND ----------
 

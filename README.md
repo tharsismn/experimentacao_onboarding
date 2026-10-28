@@ -10,12 +10,11 @@ policies — com a tag de custo `budget` em tudo o que é criado.
 | `zerar_system_ai.py` | Rate limit 0 por usuário em todos os services de `system.ai` + liga `enforce_ai_gateway_v3_only` (modos `simular`, `aplicar`, `remover_zero`) |
 | `onboarding_lib.py` | Funções idempotentes usadas pelos dois notebooks |
 | `grupos_exemplo.csv` | Modelo do CSV (e-mails `@example.com`) |
-| `deploy.sh <perfil> [pasta]` | Publica na pasta pessoal de quem faz o deploy e cria/atualiza o job diário `zerar_system_ai_diario` |
 | `run_tests.sh [Classe[.teste]]` | Testes locais, sem workspace |
 
 ## Identidade
 Os notebooks rodam com a autenticação de quem os executa (o admin do ambiente). Não há service principal.
-Por isso ficam na **pasta pessoal do admin** (`deploy.sh` publica em `/Workspace/Users/<quem faz o deploy>/experimentacao_onboarding`):
+Por isso ficam na **pasta pessoal do admin** (`/Workspace/Users/<admin>/experimentacao_onboarding`):
 se ficassem em `Shared`, qualquer usuário poderia editar o código que roda com privilégio de admin.
 Os notebooks **param** se a própria pasta estiver acessível aos grupos `users`/`account users`.
 
@@ -36,13 +35,24 @@ fin_users,pessoa1@example.com;pessoa2@example.com,financas,wh_financas,gpt-5-min
 | `budget` | Valor da tag de custo `budget`; vazio = nome do grupo. Use o mesmo valor na tag `budget` da usage policy |
 | `tpm`, `qpm` | Limites do grupo por modelo; **vazio ou 0 = sem limite** |
 
+## Instalação (pela interface do workspace)
+1. Baixe os arquivos `onboarding_grupos.py`, `zerar_system_ai.py`, `onboarding_lib.py` e `grupos_exemplo.csv`.
+2. No workspace, abra **Workspace → Home** (a sua pasta pessoal) e crie a pasta `experimentacao_onboarding`.
+3. Na pasta, use **⋮ → Import**, arraste os três `.py` e importe. Os dois notebooks entram como **notebooks** e o
+   `onboarding_lib.py` entra como **arquivo** — os três precisam ficar na mesma pasta.
+4. Renomeie/edite o `grupos_exemplo.csv` para `grupos.csv` com os grupos da área e importe na mesma pasta.
+
+Não há script de instalação nem job agendado: os notebooks são executados manualmente pelo admin.
+
 ## Uso
 1. Para cada área, crie a serverless usage policy na interface (Settings > Compute > Serverless usage policies)
    com a tag `budget=<área>`.
 2. Suba o CSV na mesma pasta dos notebooks (`.../experimentacao_onboarding/grupos.csv`).
 3. Abra `onboarding_grupos`, rode a célula 0 e informe CSV (padrão `grupos.csv`), modo, catálogo (já existente)
    e grupo admin. Rode tudo em `simular`, confira, e depois em `aplicar`. Cada célula pode ser executada sozinha.
-4. Uma vez: `zerar_system_ai` em `aplicar` com `conceder_manage = sim`. Depois o job diário mantém.
+4. `zerar_system_ai` em `aplicar` (na primeira vez com `conceder_manage = sim`). Execução manual: rode de novo
+   quando a célula 0 do `onboarding_grupos` avisar que há modelos de `system.ai` sem o zero (modelos novos
+   publicados pela Databricks entram sem limite).
 
 Reexecuções não duplicam nada: o que existe é reaproveitado, o que mudou no CSV é atualizado, o que é novo é criado.
 Nada é removido — itens retirados do CSV continuam existindo (remoção manual).
