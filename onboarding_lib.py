@@ -15,7 +15,12 @@ SCHEMA_PRIVILEGES = [
     "CREATE_MATERIALIZED_VIEW", "EXECUTE", "REFRESH",
 ]
 ENTITLEMENTS = ["WORKSPACE_ACCESS", "DATABRICKS_SQL_ACCESS"]
-CSV_COLUMNS = ["grupo", "emails", "schema", "warehouse", "modelos", "tpm", "qpm"]
+CSV_COLUMNS = ["grupo", "emails", "schema", "warehouse", "modelos"]
+# Opcionais: nome da usage policy (interface) · valor da tag de custo · limites do grupo por modelo
+# (tpm/qpm vazios ou 0 = sem limite — no Unity Gateway um limite 0 bloquearia o grupo inteiro)
+CSV_OPTIONAL = ["usage_policy", "budget", "tpm", "qpm"]
+POLICY_USER_ROLE = "roles/budgetPolicy.user"
+TAG_KEY = "budget"   # tag de custo padronizada; o valor separa as áreas
 
 _NAME_RE = re.compile(r"^[a-z0-9_]+$")
 _EMAIL_RE = re.compile(r"^[^@\s;,]+@[^@\s;,]+\.[^@\s;,]+$")
@@ -67,15 +72,18 @@ def parse_csv(text, defaults):
             "schema": schema,
             "warehouse": (row.get("warehouse") or "").strip() or defaults["warehouse_padrao"],
             "modelos": modelos,
+            "usage_policy": (row.get("usage_policy") or "").strip(),
+            "budget": (row.get("budget") or "").strip() or g,
         }
         for campo in ("tpm", "qpm"):
             raw = (row.get(campo) or "").strip()
             try:
-                item[campo] = int(raw) if raw else int(defaults[f"{campo}_padrao"])
-                if item[campo] < 0:
+                valor = int(raw) if raw else 0
+                if valor < 0:
                     raise ValueError
+                item[campo] = valor or None   # None = sem limite
             except ValueError:
-                erros.append(f"{ctx}: {campo} inválido ('{raw}')")
+                erros.append(f"{ctx}: {campo} inválido ('{raw}') — use um inteiro positivo ou deixe vazio")
                 item[campo] = None
 
         if not _NAME_RE.match(g):
@@ -254,30 +262,59 @@ def ensure_schema(do, catalogo, schema, grupo, owner, aplicar):
     return status, f"{full} (owner {owner or 'executor'}; grants: {', '.join(SCHEMA_PRIVILEGES)})"
 
 
-def ensure_warehouse(do, nome, grupo, cfg, aplicar):
+def _with_tag(custom_tags, key, value):
+    """Lista de tags com key=value (substitui só essa chave; mantém as demais)."""
+    return [t for t in (custom_tags or []) if t.get("key") != key] + [{"key": key, "value": value}]
+
+
+def ensure_warehouse(do, nome, grupo, budget, cfg, aplicar):
     whs = do("GET", "/api/2.0/sql/warehouses").get("warehouses", [])
     found = next((w for w in whs if w["name"] == nome), None)
-    if found:
-        wid, status = found["id"], "existe"
-    elif not aplicar:
-        return "criaria", nome
-    else:
+    tag = f"{TAG_KEY}={budget}"
+    if not found:
+        if not aplicar:
+            return "criaria", f"{nome} ({tag})"
         wid = do("POST", "/api/2.0/sql/warehouses", {
             "name": nome, "cluster_size": cfg["warehouse_tamanho"], "min_num_clusters": 1,
             "max_num_clusters": cfg["warehouse_max_clusters"], "auto_stop_mins": cfg["warehouse_auto_stop"],
             "enable_serverless_compute": True, "warehouse_type": "PRO",
-            "tags": {"custom_tags": [{"key": "grupo", "value": grupo}]},
+            "tags": {"custom_tags": [{"key": TAG_KEY, "value": budget}]},
         })["id"]
         status = "criado"
+    else:
+        wid, status = found["id"], "existe"
+        atual = do("GET", f"/api/2.0/sql/warehouses/{wid}")
+        tags = (atual.get("tags") or {}).get("custom_tags", [])
+        if {"key": TAG_KEY, "value": budget} not in [{"key": t.get("key"), "value": t.get("value")} for t in tags]:
+            if not aplicar:
+                return "atualizaria", f"{nome} ({wid}) tag {tag}"
+            # edit regrava a configuração: reenvia a atual, mudando só as tags
+            campos = ["name", "cluster_size", "min_num_clusters", "max_num_clusters", "auto_stop_mins",
+                      "enable_serverless_compute", "warehouse_type", "spot_instance_policy", "enable_photon", "channel"]
+            body = {k: atual[k] for k in campos if k in atual}
+            body["tags"] = {"custom_tags": _with_tag(tags, TAG_KEY, budget)}
+            do("POST", f"/api/2.0/sql/warehouses/{wid}/edit", body)
+            status = "atualizado"
     if aplicar:
         do("PATCH", f"/api/2.0/permissions/warehouses/{wid}",
            {"access_control_list": [{"group_name": grupo, "permission_level": "CAN_USE"}]})
-    return status, f"{nome} ({wid}) CAN_USE p/ {grupo}"
+    return status, f"{nome} ({wid}) CAN_USE p/ {grupo}; tag {tag}"
 
 
 def group_rate_limits(grupo, tpm, qpm):
+    """Limites do grupo; tpm/qpm None = sem limite (nenhuma regra)."""
     base = {"key": "RATE_LIMIT_KEY_USER_GROUP", "principal": grupo, "renewal_period": "RATE_LIMIT_RENEWAL_PERIOD_MINUTE"}
-    return [dict(base, tokens=tpm), dict(base, requests=qpm)]
+    return ([dict(base, tokens=tpm)] if tpm else []) + ([dict(base, requests=qpm)] if qpm else [])
+
+
+def describe_limits(tpm, qpm):
+    return " / ".join([f"{tpm} TPM" if tpm else "TPM sem limite", f"{qpm} QPM" if qpm else "QPM sem limite"])
+
+
+def _same_limits(a, b):
+    """Compara listas de rate limit ignorando ordem e o tipo dos números ("0" vs 0)."""
+    norm = lambda rs: sorted(tuple(sorted((k, str(v)) for k, v in r.items() if v is not None)) for r in rs or [])
+    return norm(a) == norm(b)
 
 
 def ensure_model_service(do, catalogo, schema, grupo, modelo, destino, tpm, qpm, aplicar):
@@ -285,12 +322,16 @@ def ensure_model_service(do, catalogo, schema, grupo, modelo, destino, tpm, qpm,
     full = f"{catalogo}.{schema}.{svc}"
     limits = group_rate_limits(grupo, tpm, qpm)
     try:
-        do("GET", f"/api/2.1/unity-catalog/model-services/{full}")
+        atual = do("GET", f"/api/2.1/unity-catalog/model-services/{full}")
         exists = True
     except ApiError as e:
         if not _not_found(e):
             raise
-        exists = False
+        atual, exists = {}, False
+    if exists and _same_limits((atual.get("config") or {}).get("rate_limits", []), limits):
+        if aplicar:
+            _grant(do, "model_service", full, grupo, ["EXECUTE"])
+        return "existe", f"{full} → {modelo}; {describe_limits(tpm, qpm)} p/ {grupo}"
     if not aplicar:
         return ("atualizaria" if exists else "criaria"), full
     if exists:
@@ -309,4 +350,100 @@ def ensure_model_service(do, catalogo, schema, grupo, modelo, destino, tpm, qpm,
         })
         status = "criado"
     _grant(do, "model_service", full, grupo, ["EXECUTE"])
-    return status, f"{full} → {modelo}; {tpm} TPM / {qpm} QPM p/ {grupo}"
+    return status, f"{full} → {modelo}; {describe_limits(tpm, qpm)} p/ {grupo}"
+
+
+# ------------------------------------------------- serverless usage policy ----
+# Não há API de workspace que liste policies; o nome→id vem do audit log (system.access.audit),
+# onde a criação registra policy_id e policy_name. Exclusões são descartadas.
+
+POLICIES_SQL = """
+SELECT account_id, action_name, event_time,
+       to_json(request_params) AS request_params, response.result AS result
+FROM system.access.audit
+WHERE service_name = 'budgetPolicyCentral'
+  AND action_name IN ('createBudgetPolicy', 'updateBudgetPolicy', 'deleteBudgetPolicy')
+  AND response.status_code = 200
+  AND event_date >= current_date() - INTERVAL {dias} DAYS
+"""
+
+
+def policies_from_audit(rows):
+    """rows: dicts com action_name, event_time, request_params (json), result (json).
+    Devolve {nome: policy_id} das policies existentes (último nome conhecido, sem as apagadas)."""
+    import json as _json
+    nome_por_id, apagadas = {}, set()
+    for r in sorted(rows, key=lambda r: str(r["event_time"])):
+        try:
+            res = _json.loads(r.get("result") or "{}")
+        except ValueError:
+            res = {}
+        if r["action_name"] == "deleteBudgetPolicy":
+            pid = _json.loads(r.get("request_params") or "{}").get("policy_id")
+            if pid:
+                apagadas.add(pid)
+            continue
+        pid, nome = res.get("policy_id"), res.get("policy_name")
+        if pid and nome:
+            nome_por_id[pid] = nome
+            apagadas.discard(pid)
+    return {nome: pid for pid, nome in nome_por_id.items() if pid not in apagadas}
+
+
+def ensure_policy_user(do, account_id, policy_id, grupo, aplicar):
+    """Dá o papel User na policy ao grupo (rule set via proxy do workspace). PUT substitui
+    o rule set inteiro, por isso lê as regras atuais e só acrescenta o grupo."""
+    nome = f"accounts/{account_id}/budgetPolicies/{policy_id}/ruleSets/default"
+    atual = do("GET", "/api/2.0/preview/accounts/access-control/rule-sets?name=" + quote(nome, safe="") + "&etag=")
+    regras = [dict(r) for r in atual.get("grant_rules", [])]
+    principal = f"groups/{grupo}"
+    regra = next((r for r in regras if r.get("role") == POLICY_USER_ROLE), None)
+    if regra and principal in regra.get("principals", []):
+        return "existe", f"{grupo} já é User da policy {policy_id}"
+    if not aplicar:
+        return "criaria", f"{grupo} → User da policy {policy_id}"
+    if regra:
+        regra["principals"] = list(regra.get("principals", [])) + [principal]
+    else:
+        regras.append({"role": POLICY_USER_ROLE, "principals": [principal]})
+    do("PUT", "/api/2.0/preview/accounts/access-control/rule-sets",
+       {"name": nome, "rule_set": {"name": nome, "etag": atual.get("etag", ""), "grant_rules": regras}})
+    return "criado", f"{grupo} → User da policy {policy_id}"
+
+
+# ----------------------------------------------------------------- tags ----
+
+def ensure_tag(do, entity_type, full_name, key, value, aplicar):
+    tags = do("GET", f"/api/2.1/unity-catalog/entity-tag-assignments/{entity_type}/{full_name}/tags")
+    atual = next((t for t in tags.get("tag_assignments", []) if t.get("tag_key") == key), None)
+    if atual and atual.get("tag_value") == value:
+        return "existe", f"{key}={value}"
+    if not aplicar:
+        return ("atualizaria" if atual else "criaria"), f"{key}={value}"
+    if atual:
+        do("PATCH", f"/api/2.1/unity-catalog/entity-tag-assignments/{entity_type}/{full_name}/tags/{key}?update_mask=tag_value",
+           {"tag_value": value})
+        return "atualizado", f"{key}={value}"
+    do("POST", "/api/2.1/unity-catalog/entity-tag-assignments",
+       {"entity_name": full_name, "entity_type": entity_type, "tag_key": key, "tag_value": value})
+    return "criado", f"{key}={value}"
+
+
+ENFORCE_GATEWAY_SETTING = "enforce_ai_gateway_v3_only"
+
+
+def ensure_bool_setting(do, nome, valor, aplicar):
+    """Setting booleana de workspace (API settings v2)."""
+    atual = do("GET", f"/api/2.1/settings/{nome}")
+    efetivo = ((atual.get("effective_boolean_val") or atual.get("boolean_val") or {}).get("value"))
+    if efetivo == valor:
+        return "sem mudança", f"{nome} = {valor}"
+    if not aplicar:
+        return "alteraria", f"{nome}: {efetivo} → {valor}"
+    do("PATCH", f"/api/2.1/settings/{nome}", {"name": nome, "boolean_val": {"value": valor}})
+    return "alterado", f"{nome}: {efetivo} → {valor}"
+
+
+def system_ai_not_zeroed(servicos):
+    """Modelos de system.ai ainda sem o zero padrão (para o aviso do onboarding)."""
+    return sorted(n for n, i in servicos.items() if zero_limits_for(i["rate_limits"]) is not None)

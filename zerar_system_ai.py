@@ -7,8 +7,12 @@
 # MAGIC que não são afetados. Modelos novos publicados pela Databricks entram sem limite — por isso este
 # MAGIC notebook roda também como job diário.
 # MAGIC
-# MAGIC **Limitação conhecida:** `ai_query` e os endpoints legados `/serving-endpoints/databricks-*` não respeitam
-# MAGIC este limite. Para eles o controle é o budget do Unity Gateway (account console).
+# MAGIC Em `aplicar`, também liga a configuração de workspace **`enforce_ai_gateway_v3_only`**, que bloqueia os
+# MAGIC endpoints legados `/serving-endpoints/databricks-*` (e o `ai_query` com nomes legados), forçando todo acesso
+# MAGIC a modelos pelo Unity Gateway. `remover_zero` não desliga essa configuração.
+# MAGIC
+# MAGIC **Limitação conhecida:** `ai_query('system.ai.<modelo>', ...)` não respeita o zero. Para ele o controle é o
+# MAGIC budget do Unity Gateway (account console).
 # MAGIC
 # MAGIC Quem executa precisa de `MANAGE` em `system.ai` (o metastore admin pode conceder a si mesmo — opção abaixo).
 
@@ -38,7 +42,7 @@ w = WorkspaceClient()
 def do(method, path, body=None):
     parts = urlsplit(path)
     try:
-        return w.api_client.do(method, parts.path, query=dict(parse_qsl(parts.query)) or None, body=body) or {}
+        return w.api_client.do(method, parts.path, query=dict(parse_qsl(parts.query, keep_blank_values=True)) or None, body=body) or {}
     except DatabricksError as e:
         raise lib.ApiError(str(e), status=404 if isinstance(e, NotFound) else None,
                            error_code=getattr(e, "error_code", "") or "") from e
@@ -59,6 +63,12 @@ if CONCEDER and MODO != "simular":
 
 servicos = lib.system_ai_models(do)
 resultado = []
+if MODO != "remover_zero":
+    try:
+        st, det = lib.ensure_bool_setting(do, lib.ENFORCE_GATEWAY_SETTING, True, MODO == "aplicar")
+        resultado.append((f"(configuração) {lib.ENFORCE_GATEWAY_SETTING}", st, det))
+    except Exception as e:
+        resultado.append((f"(configuração) {lib.ENFORCE_GATEWAY_SETTING}", "ERRO", str(e)[:300]))
 for nome, info in sorted(servicos.items()):
     atual = info["rate_limits"]
     if MODO == "remover_zero":
