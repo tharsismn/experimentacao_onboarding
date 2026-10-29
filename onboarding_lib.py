@@ -448,6 +448,18 @@ def ensure_bool_setting(do, nome, valor, aplicar):
     return "atualizado", f"{nome}: {efetivo} → {valor}"
 
 
+def is_metastore_admin(do, username):
+    """(é_admin, owner): o executor é o owner do metastore ou membro (direto ou aninhado) do grupo owner."""
+    owner = do("GET", "/api/2.1/unity-catalog/metastore_summary").get("owner", "")
+    if owner == username:
+        return True, owner
+    users = do("GET", "/api/2.0/identity/users?filter=" + quote(f'username eq "{username}"')).get("users", [])
+    if not users:
+        return False, owner
+    grupos = do("GET", f"/api/2.0/identity/principals/{users[0]['user_id']}/transitive-parent-groups")
+    return owner in {g.get("group_name") for g in grupos.get("transitive_parent_groups", [])}, owner
+
+
 def grant_manage_system_ai(do, principal, aplicar):
     """MANAGE em system.ai é exigido para alterar os limites dos modelos (o metastore admin concede a si)."""
     atual = do("GET", "/api/2.1/unity-catalog/permissions/schema/system.ai").get("privilege_assignments", [])

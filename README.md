@@ -18,7 +18,7 @@ se ficassem em `Shared`, qualquer usuário poderia editar o código que roda com
 O notebook **para** se a própria pasta estiver acessível aos grupos `users`/`account users`.
 
 Quem executa: workspace admin, com `USE_CATALOG`/`CREATE_SCHEMA` no catálogo e `SELECT` em `system.access.audit`;
-para a etapa 4, também metastore admin.
+para a etapa 4, também **admin do metastore** (owner ou membro do grupo owner).
 
 ## CSV
 ```
@@ -58,7 +58,8 @@ Não há script de instalação nem job agendado: o notebook é executado manual
 1. Para cada área, crie a serverless usage policy na interface (Settings > Compute > Serverless usage policies)
    com a tag `budget=<área>`.
 2. Abra `onboarding_grupos` e rode a célula **Parâmetros** (a primeira): os campos aparecem no topo. Informe: CSV (padrão `grupos.csv`), modo, catálogo (já existente),
-   grupo admin, `system.ai` (`zerar` / `remover_zero` / `nao_mexer`) e, na primeira vez, `conceder MANAGE = sim`.
+   grupo admin e `system.ai` (`zerar` / `remover_zero` / `nao_mexer`). A etapa 4 concede ao executor o `MANAGE` em
+   `system.ai` de que precisa (quem executa deve ser admin do metastore; se não for, a célula 0 para com o motivo).
 3. Rode tudo em `simular`, confira, e depois em `aplicar`. Ao mudar um campo, rode a célula 0 de novo (ou Run all).
    Cada célula pode ser executada sozinha.
 

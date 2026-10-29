@@ -23,7 +23,7 @@
 # MAGIC para o custo do serverless, do SQL e do GenAI somar na mesma área.
 # MAGIC
 # MAGIC Quem executa: workspace admin, com `USE_CATALOG`/`CREATE_SCHEMA` no catálogo, `SELECT` em `system.access.audit`
-# MAGIC e, para a etapa 4, metastore admin.
+# MAGIC e, para a etapa 4, **admin do metastore** (a etapa concede a si mesma o `MANAGE` em `system.ai` necessário).
 
 # COMMAND ----------
 
@@ -33,7 +33,10 @@ dbutils.widgets.dropdown("modo", "simular", ["simular", "aplicar"], "2. Modo")
 dbutils.widgets.text("catalogo", "", "3. Catálogo (já existente)")
 dbutils.widgets.text("grupo_admin", "", "4. Grupo admin (owner dos schemas; opcional)")
 dbutils.widgets.dropdown("system_ai", "zerar", ["zerar", "remover_zero", "nao_mexer"], "5. Etapa 4: system.ai")
-dbutils.widgets.dropdown("conceder_manage", "nao", ["nao", "sim"], "6. Etapa 4: conceder MANAGE em system.ai")
+try:
+    dbutils.widgets.remove("conceder_manage")   # campo de versões anteriores (MANAGE agora é automático)
+except Exception:
+    pass
 
 _faltando = [] if dbutils.widgets.get("catalogo").strip() else ["3. Catálogo"]
 print("Campos prontos no topo do notebook. Preencha-os e rode as próximas células (ou Run all).")
@@ -68,7 +71,6 @@ APLICAR = dbutils.widgets.get("modo") == "aplicar"
 CATALOGO = dbutils.widgets.get("catalogo").strip()
 GRUPO_ADMIN = dbutils.widgets.get("grupo_admin").strip()
 SYSTEM_AI = dbutils.widgets.get("system_ai")
-CONCEDER_MANAGE = dbutils.widgets.get("conceder_manage") == "sim"
 
 import importlib, json, os, sys
 from urllib.parse import urlsplit, parse_qsl
@@ -144,6 +146,12 @@ else:
         erros.append(f"catálogo '{CATALOGO}' não encontrado ou sem acesso: {e}")
 if GRUPO_ADMIN and lib.ensure_group(do, GRUPO_ADMIN, aplicar=False)[0] != "existe":
     erros.append(f"grupo admin '{GRUPO_ADMIN}' não existe no account")
+EXECUTOR = w.current_user.me().user_name
+if SYSTEM_AI != "nao_mexer":
+    _admin, _owner = lib.is_metastore_admin(do, EXECUTOR)
+    if not _admin:
+        erros.append(f"a etapa 4 exige que quem executa seja admin do metastore (owner: '{_owner}'); "
+                     f"{EXECUTOR} não é. Execute com o admin do metastore ou use '5. Etapa 4: system.ai' = nao_mexer")
 try:
     texto = open(CSV_PATH, encoding="utf-8").read()
 except Exception as e:
@@ -218,9 +226,9 @@ ETAPA = nova_etapa("4. zerar system.ai")
 if SYSTEM_AI == "nao_mexer":
     RESULTADO.append((ETAPA, "(todos)", "system.ai", "pulado", "parâmetro 'system.ai' = nao_mexer"))
 else:
-    if CONCEDER_MANAGE:
-        registrar(ETAPA, "(todos)", "MANAGE em system.ai", lib.grant_manage_system_ai,
-                  do, w.current_user.me().user_name, APLICAR)
+    # Alterar os modelos de system.ai exige MANAGE no schema — nem o admin do metastore tem por padrão,
+    # mas pode conceder a si mesmo. Só concede se ainda não tiver.
+    registrar(ETAPA, "(todos)", "MANAGE em system.ai", lib.grant_manage_system_ai, do, EXECUTOR, APLICAR)
     if SYSTEM_AI == "zerar" and CONFIG["ligar_enforce_gateway"]:
         registrar(ETAPA, "(todos)", lib.ENFORCE_GATEWAY_SETTING, lib.ensure_bool_setting,
                   do, lib.ENFORCE_GATEWAY_SETTING, True, APLICAR)

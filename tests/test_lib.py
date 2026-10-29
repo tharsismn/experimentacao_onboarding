@@ -287,6 +287,22 @@ class TestWarehouseServerless(unittest.TestCase):
         self.assertEqual((body["max_num_clusters"], body["auto_stop_mins"]), (3, 5))
 
 
+class TestMetastoreAdmin(unittest.TestCase):
+    def _api(self, owner, grupos):
+        def api(m, p, b=None):
+            if "metastore_summary" in p:
+                return {"owner": owner}
+            if "/identity/users" in p:
+                return {"users": [{"user_id": "7"}]}
+            return {"transitive_parent_groups": [{"group_name": g} for g in grupos]}
+        return api
+
+    def test_owner_usuario_ou_grupo(self):
+        self.assertEqual(lib.is_metastore_admin(self._api("eu@x.com", []), "eu@x.com"), (True, "eu@x.com"))
+        self.assertTrue(lib.is_metastore_admin(self._api("metastore_admins", ["account users", "metastore_admins"]), "eu@x.com")[0])
+        self.assertFalse(lib.is_metastore_admin(self._api("metastore_admins", ["account users"]), "eu@x.com")[0])
+
+
 class TestAssignment(unittest.TestCase):
     def test_ja_atribuido_na_criacao_conta_como_existe(self):
         def api(m, p, b=None):
