@@ -2,8 +2,9 @@
 # MAGIC %md
 # MAGIC # Onboarding de grupos — ambiente de experimentação
 # MAGIC
-# MAGIC Uma célula por etapa. Rode a **célula 0 (configuração e validação)** primeiro; depois as etapas
-# MAGIC em ordem (ou **Run all**). Cada etapa pode ser executada de novo sozinha — nada é duplicado.
+# MAGIC **Primeiro rode a célula "Parâmetros"**: os campos aparecem no topo do notebook. Preencha-os e rode a
+# MAGIC **célula 0 (configuração e validação)** e as etapas em ordem (ou **Run all**). Ao mudar um campo, rode a célula 0
+# MAGIC de novo. Cada etapa pode ser executada de novo sozinha — nada é duplicado.
 # MAGIC
 # MAGIC | Etapa | O que faz |
 # MAGIC |---|---|
@@ -26,7 +27,7 @@
 
 # COMMAND ----------
 
-# DBTITLE 1,0. Configuração e validação
+# DBTITLE 1,Parâmetros (rode primeiro: os campos aparecem no topo do notebook)
 dbutils.widgets.text("csv_path", "grupos.csv", "1. CSV (nome na pasta do notebook ou caminho completo)")
 dbutils.widgets.dropdown("modo", "simular", ["simular", "aplicar"], "2. Modo")
 dbutils.widgets.text("catalogo", "", "3. Catálogo (já existente)")
@@ -34,6 +35,13 @@ dbutils.widgets.text("grupo_admin", "", "4. Grupo admin (owner dos schemas; opci
 dbutils.widgets.dropdown("system_ai", "zerar", ["zerar", "remover_zero", "nao_mexer"], "5. Etapa 4: system.ai")
 dbutils.widgets.dropdown("conceder_manage", "nao", ["nao", "sim"], "6. Etapa 4: conceder MANAGE em system.ai")
 
+_faltando = [] if dbutils.widgets.get("catalogo").strip() else ["3. Catálogo"]
+print("Campos prontos no topo do notebook. Preencha-os e rode as próximas células (ou Run all).")
+print("⚠️ Obrigatório e ainda vazio: " + ", ".join(_faltando) if _faltando else "✔ Campos obrigatórios preenchidos.")
+
+# COMMAND ----------
+
+# DBTITLE 1,0. Configuração e validação
 # ---------------------------------------------------------------- configuração do ambiente ----
 # Regras aplicadas a TODOS os grupos. Altere aqui (e não na onboarding_lib.py).
 CONFIG = {
@@ -128,7 +136,7 @@ def mostrar(etapa):
 # --- validação ---
 erros, avisos = [], []
 if not CATALOGO:
-    erros.append("informe o catálogo")
+    erros.append("preencha o campo '3. Catálogo' no topo do notebook (catálogo já existente) e rode de novo")
 else:
     try:
         do("GET", f"/api/2.1/unity-catalog/catalogs/{CATALOGO}")

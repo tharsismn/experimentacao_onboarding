@@ -57,9 +57,10 @@ Não há script de instalação nem job agendado: o notebook é executado manual
 ## Uso
 1. Para cada área, crie a serverless usage policy na interface (Settings > Compute > Serverless usage policies)
    com a tag `budget=<área>`.
-2. Abra `onboarding_grupos`, rode a célula 0 e informe: CSV (padrão `grupos.csv`), modo, catálogo (já existente),
+2. Abra `onboarding_grupos` e rode a célula **Parâmetros** (a primeira): os campos aparecem no topo. Informe: CSV (padrão `grupos.csv`), modo, catálogo (já existente),
    grupo admin, `system.ai` (`zerar` / `remover_zero` / `nao_mexer`) e, na primeira vez, `conceder MANAGE = sim`.
-3. Rode tudo em `simular`, confira, e depois em `aplicar`. Cada célula pode ser executada sozinha.
+3. Rode tudo em `simular`, confira, e depois em `aplicar`. Ao mudar um campo, rode a célula 0 de novo (ou Run all).
+   Cada célula pode ser executada sozinha.
 
 Reexecuções não duplicam nada: o que existe é reaproveitado, o que mudou no CSV é atualizado, o que é novo é criado.
 Nada é removido — itens retirados do CSV continuam existindo (remoção manual).
