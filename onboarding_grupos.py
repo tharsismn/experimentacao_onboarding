@@ -154,8 +154,8 @@ if nao_zerados:
 
 print(f"CSV: {CSV_PATH}")
 if erros:
-    print("❌ Corrija antes de continuar:\n- " + "\n- ".join(erros))
-    dbutils.notebook.exit("ERRO_VALIDACAO")
+    # Erro (e não dbutils.notebook.exit): a mensagem aparece na célula e o "Run all" para aqui.
+    raise Exception("Validação falhou — corrija antes de continuar (nada foi alterado):\n- " + "\n- ".join(erros))
 print(f"✔ {len(GRUPOS)} grupo(s) válidos · modo = {'APLICAR' if APLICAR else 'SIMULAR (nada é alterado)'} · "
       f"etapa 4 = {SYSTEM_AI}")
 for g in GRUPOS:
