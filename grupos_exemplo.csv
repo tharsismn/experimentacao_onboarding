@@ -1,3 +1,3 @@
 grupo,emails,schema,warehouse,modelos,usage_policy,budget,tpm,qpm
 fin_users,pessoa1@example.com;pessoa2@example.com,financas,wh_financas,gpt-5-mini;gte-large-en,exp_financas,foundationlab,,
-risco_users,pessoa3@example.com,riscos,,gpt-5-mini,exp_riscos,riscos,,
+risco_users,pessoa3@example.com,riscos,wh_riscos,gpt-5-mini,exp_riscos,riscos,,

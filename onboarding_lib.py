@@ -46,7 +46,7 @@ def _split(value):
     return [v.strip() for v in (value or "").split(";") if v.strip()]
 
 
-def parse_csv(text, warehouse_padrao):
+def parse_csv(text):
     """Lê o CSV e devolve (grupos, erros). Cada grupo é um dict normalizado."""
     reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
     missing = [c for c in CSV_COLUMNS if c not in (reader.fieldnames or [])]
@@ -66,7 +66,7 @@ def parse_csv(text, warehouse_padrao):
             "grupo": g,
             "emails": emails,
             "schema": schema,
-            "warehouse": (row.get("warehouse") or "").strip() or warehouse_padrao,
+            "warehouse": (row.get("warehouse") or "").strip(),
             "modelos": modelos,
             "usage_policy": (row.get("usage_policy") or "").strip(),
             "budget": (row.get("budget") or "").strip() or g,
@@ -89,6 +89,8 @@ def parse_csv(text, warehouse_padrao):
         vistos.add(g)
         if not _NAME_RE.match(schema):
             erros.append(f"{ctx}: schema obrigatório (minúsculas, números e _)")
+        if not item["warehouse"]:
+            erros.append(f"{ctx}: warehouse obrigatório (nome de um novo ou de um já existente)")
         for e in emails:
             if not _EMAIL_RE.match(e):
                 erros.append(f"{ctx}: e-mail inválido '{e}'")
@@ -264,45 +266,37 @@ def ensure_schema(do, catalogo, schema, grupo, owner, priv_schema, priv_catalogo
     return status, f"{full} (owner {owner or 'executor'}; grants: {', '.join(priv_schema)})"
 
 
-def _with_tag(custom_tags, key, value):
-    """Lista de tags com key=value (substitui só essa chave; mantém as demais)."""
-    return [t for t in (custom_tags or []) if t.get("key") != key] + [{"key": key, "value": value}]
-
-
 def ensure_warehouse(do, nome, grupo, tag_key, tag_value, cfg, aplicar):
-    """cfg: tamanho, min_clusters, max_clusters, auto_stop_min (só usados ao criar).
-    O warehouse é sempre serverless (que exige o tipo PRO)."""
+    """Cria o warehouse se não existir (sempre serverless, que exige o tipo PRO, com a tag de custo;
+    cfg: tamanho, min_clusters, max_clusters, auto_stop_min). Se já existir, não altera nada nele:
+    só concede CAN_USE ao grupo."""
     whs = do("GET", "/api/2.0/sql/warehouses").get("warehouses", [])
     found = next((w for w in whs if w["name"] == nome), None)
     tag = f"{tag_key}={tag_value}"
-    if not found:
+    if found:
+        wid = found["id"]
+        acl = do("GET", f"/api/2.0/permissions/warehouses/{wid}").get("access_control_list", [])
+        tem = any(a.get("group_name") == grupo and any(p.get("permission_level") in ("CAN_USE", "CAN_MONITOR", "CAN_MANAGE", "IS_OWNER")
+                                                         and not p.get("inherited") for p in a.get("all_permissions", []))
+                  for a in acl)
+        if tem:
+            return "existe", f"{nome} ({wid}) já existente; {grupo} já tem acesso"
         if not aplicar:
-            return "criaria", f"{nome} ({tag})"
-        wid = do("POST", "/api/2.0/sql/warehouses", {
-            "name": nome, "cluster_size": cfg["tamanho"], "min_num_clusters": cfg["min_clusters"],
-            "max_num_clusters": cfg["max_clusters"], "auto_stop_mins": cfg["auto_stop_min"],
-            "enable_serverless_compute": True, "warehouse_type": "PRO",
-            "tags": {"custom_tags": [{"key": tag_key, "value": tag_value}]},
-        })["id"]
-        status = "criado"
-    else:
-        wid, status = found["id"], "existe"
-        atual = do("GET", f"/api/2.0/sql/warehouses/{wid}")
-        tags = (atual.get("tags") or {}).get("custom_tags", [])
-        if {"key": tag_key, "value": tag_value} not in [{"key": t.get("key"), "value": t.get("value")} for t in tags]:
-            if not aplicar:
-                return "atualizaria", f"{nome} ({wid}) tag {tag}"
-            # edit regrava a configuração: reenvia a atual, mudando só as tags
-            campos = ["name", "cluster_size", "min_num_clusters", "max_num_clusters", "auto_stop_mins",
-                      "enable_serverless_compute", "warehouse_type", "spot_instance_policy", "enable_photon", "channel"]
-            body = {k: atual[k] for k in campos if k in atual}
-            body["tags"] = {"custom_tags": _with_tag(tags, tag_key, tag_value)}
-            do("POST", f"/api/2.0/sql/warehouses/{wid}/edit", body)
-            status = "atualizado"
-    if aplicar:
+            return "atualizaria", f"{nome} ({wid}) já existente; concederia CAN_USE p/ {grupo}"
         do("PATCH", f"/api/2.0/permissions/warehouses/{wid}",
            {"access_control_list": [{"group_name": grupo, "permission_level": "CAN_USE"}]})
-    return status, f"{nome} ({wid}) CAN_USE p/ {grupo}; tag {tag}"
+        return "atualizado", f"{nome} ({wid}) já existente; CAN_USE p/ {grupo} (warehouse e tags não alterados)"
+    if not aplicar:
+        return "criaria", f"{nome} ({tag}) + CAN_USE p/ {grupo}"
+    wid = do("POST", "/api/2.0/sql/warehouses", {
+        "name": nome, "cluster_size": cfg["tamanho"], "min_num_clusters": cfg["min_clusters"],
+        "max_num_clusters": cfg["max_clusters"], "auto_stop_mins": cfg["auto_stop_min"],
+        "enable_serverless_compute": True, "warehouse_type": "PRO",
+        "tags": {"custom_tags": [{"key": tag_key, "value": tag_value}]},
+    })["id"]
+    do("PATCH", f"/api/2.0/permissions/warehouses/{wid}",
+       {"access_control_list": [{"group_name": grupo, "permission_level": "CAN_USE"}]})
+    return "criado", f"{nome} ({wid}) CAN_USE p/ {grupo}; tag {tag}"
 
 
 def group_rate_limits(grupo, tpm, qpm):

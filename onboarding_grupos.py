@@ -10,14 +10,14 @@
 # MAGIC |---|---|
 # MAGIC | 1. Grupos e usuários | grupo de account, cadastro dos usuários, membros, atribuição ao workspace |
 # MAGIC | 2. Schema e permissões | schema no catálogo informado, owner = grupo admin, privilégios da configuração (sem volumes) |
-# MAGIC | 3. SQL warehouse | warehouse serverless com a tag de custo, `CAN_USE` p/ o grupo |
+# MAGIC | 3. SQL warehouse | cria o warehouse serverless com a tag de custo (se já existir, não o altera) e dá `CAN_USE` ao grupo |
 # MAGIC | 4. Zerar modelos de system.ai | limite 0 para **todos** em todos os modelos de `system.ai` + só acesso via Unity Gateway |
 # MAGIC | 5. GenAI do grupo | model service da área por modelo do CSV (`EXECUTE` só p/ o grupo, tag de custo), com o TPM/QPM do CSV |
 # MAGIC | 6. Serverless usage policy | papel **User** do grupo na policy informada (a policy é criada antes, na interface) |
 # MAGIC | 7. Resumo | tabela com todas as etapas executadas |
 # MAGIC
 # MAGIC **CSV** (na mesma pasta deste notebook): `grupo,emails,schema,warehouse,modelos,usage_policy,budget,tpm,qpm` —
-# MAGIC `emails` e `modelos` separados por `;`; `warehouse` vazio usa o padrão; `tpm`/`qpm` vazios ou 0 = **sem limite**;
+# MAGIC `emails` e `modelos` separados por `;`; `warehouse` **obrigatório** (nome novo = cria; já existente = só dá acesso ao grupo); `tpm`/`qpm` vazios ou 0 = **sem limite**;
 # MAGIC `usage_policy` = **nome** da serverless usage policy criada em Settings > Compute (vazio = pula a etapa 6);
 # MAGIC `budget` = valor da tag de custo da área (vazio = nome do grupo). Use o **mesmo** valor na tag da usage policy,
 # MAGIC para o custo do serverless, do SQL e do GenAI somar na mesma área.
@@ -57,9 +57,9 @@ CONFIG = {
     "acessos_workspace": ["WORKSPACE_ACCESS", "DATABRICKS_SQL_ACCESS"],
     # Tag de custo aplicada ao warehouse e aos model services (o valor vem da coluna budget do CSV)
     "tag_custo": "budget",
-    # SQL warehouse criado para a área — sempre serverless (só vale na criação; existentes não são reconfigurados)
-    "warehouse": {"padrao": "wh_experimentacao", "tamanho": "2X-Small",
-                  "min_clusters": 1, "max_clusters": 3, "auto_stop_min": 5},
+    # SQL warehouse criado quando o nome do CSV ainda não existe — sempre serverless
+    # (um warehouse já existente não é alterado: o grupo só recebe CAN_USE)
+    "warehouse": {"tamanho": "2X-Small", "min_clusters": 1, "max_clusters": 3, "auto_stop_min": 5},
     # Etapa 4: além do zero, obrigar todo acesso a modelos a passar pelo Unity Gateway
     # (bloqueia os endpoints legados /serving-endpoints/databricks-*)
     "ligar_enforce_gateway": True,
@@ -158,7 +158,7 @@ except Exception as e:
     texto = ""
     erros.append(f"não foi possível ler {CSV_PATH}: {e}")
 
-GRUPOS, e_csv = lib.parse_csv(texto, CONFIG["warehouse"]["padrao"]) if texto else ([], [])
+GRUPOS, e_csv = lib.parse_csv(texto) if texto else ([], [])
 erros += e_csv
 MODELOS_SYS = lib.system_ai_models(do)
 erros += lib.validate_models(GRUPOS, MODELOS_SYS)

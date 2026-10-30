@@ -29,7 +29,7 @@ fin_users,pessoa1@example.com;pessoa2@example.com,financas,wh_financas,gpt-5-min
 |---|---|
 | `grupo`, `schema` | Obrigatórias; minúsculas, números e `_` |
 | `emails`, `modelos` | Separados por `;`. `modelos` = nome do service em `system.ai`; vazio = grupo sem GenAI |
-| `warehouse` | Vazio = warehouse padrão do notebook |
+| `warehouse` | **Obrigatória**. Nome novo = o notebook cria o warehouse (serverless, com a tag `budget`); nome de um warehouse **já existente** = só concede `CAN_USE` ao grupo, sem alterar o warehouse nem as tags dele |
 | `usage_policy` | **Nome** da serverless usage policy criada na interface; vazio = pula a etapa 6 |
 | `budget` | Valor da tag de custo `budget`; vazio = nome do grupo. Use o mesmo valor na tag `budget` da usage policy |
 | `tpm`, `qpm` | Limites do grupo por modelo; **vazio ou 0 = sem limite** |
@@ -50,7 +50,7 @@ Não há script de instalação nem job agendado: o notebook é executado manual
 | `privilegios_catalogo` | `USE_CATALOG` | Privilégios do grupo no catálogo |
 | `acessos_workspace` | `WORKSPACE_ACCESS`, `DATABRICKS_SQL_ACCESS` | O que o grupo usa no workspace |
 | `tag_custo` | `budget` | Chave da tag de custo (warehouse e model services) |
-| `warehouse` | 2X-Small, 1–3 clusters, auto-stop 5 min | Warehouse criado para a área — sempre **serverless** (só na criação) |
+| `warehouse` | 2X-Small, 1–3 clusters, auto-stop 5 min | Usado só quando o warehouse do CSV ainda não existe — sempre **serverless** |
 | `ligar_enforce_gateway` | `True` | Etapa 4 liga `enforce_ai_gateway_v3_only` (bloqueia endpoints legados) |
 | `audit_dias` | `30` | Janela de busca das usage policies no audit log (etapa 6) |
 

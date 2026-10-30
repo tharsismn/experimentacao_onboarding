@@ -3,7 +3,6 @@ from urllib.parse import unquote
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import onboarding_lib as lib
 
-D = "wh_padrao"
 PRIV = ["USE_SCHEMA", "SELECT", "MODIFY", "CREATE_TABLE", "CREATE_FUNCTION", "CREATE_MATERIALIZED_VIEW", "EXECUTE", "REFRESH"]
 ENT = ["WORKSPACE_ACCESS", "DATABRICKS_SQL_ACCESS"]
 WH = {"tamanho": "2X-Small", "min_clusters": 1, "max_clusters": 3, "auto_stop_min": 5}
@@ -45,6 +44,8 @@ class FakeApi:
             raise lib.ApiError("x", error_code="NOT_FOUND")
         if method == "GET" and path == "/api/2.0/sql/warehouses":
             return {"warehouses": self.warehouses}
+        if method == "GET" and path.startswith("/api/2.0/permissions/warehouses/"):
+            return {"access_control_list": getattr(self, "wh_acl", [])}
         if method == "GET" and path.startswith("/api/2.0/sql/warehouses/"):
             wid = path.rsplit("/", 1)[1]
             return next(dict(w) for w in self.warehouses if w["id"] == wid)
@@ -77,25 +78,25 @@ class TestPasta(unittest.TestCase):
 
 class TestCsv(unittest.TestCase):
     def test_parse_ok_e_defaults(self):
-        txt = "grupo,emails,schema,warehouse,modelos,tpm,qpm\nfin,a@x.com; B@X.com ,financas,,gpt-5-mini;gte,,\n"
-        grupos, erros = lib.parse_csv(txt, D)
+        txt = "grupo,emails,schema,warehouse,modelos,tpm,qpm\nfin,a@x.com; B@X.com ,financas, wh_fin ,gpt-5-mini;gte,,\n"
+        grupos, erros = lib.parse_csv(txt)
         self.assertEqual(erros, [])
         g = grupos[0]
         self.assertEqual(g["emails"], ["a@x.com", "b@x.com"])
         self.assertEqual(g["modelos"], ["gpt-5-mini", "gte"])
-        self.assertEqual((g["warehouse"], g["tpm"], g["qpm"]), ("wh_padrao", None, None))
+        self.assertEqual((g["warehouse"], g["tpm"], g["qpm"]), ("wh_fin", None, None))
 
     def test_parse_erros(self):
-        txt = "grupo,emails,schema,warehouse,modelos,tpm,qpm\nFin-X,nao-email,,,,abc,\nok,a@x.com,s,,,,\nok,a@x.com,s,,,,\n"
-        _, erros = lib.parse_csv(txt, D)
+        txt = "grupo,emails,schema,warehouse,modelos,tpm,qpm\nFin-X,nao-email,,,,abc,\nok,a@x.com,s,wh,,,\nok,a@x.com,s,wh,,,\n"
+        _, erros = lib.parse_csv(txt)
         texto = " | ".join(erros)
-        for esperado in ["nome de grupo", "e-mail inválido", "schema obrigatório", "tpm inválido", "grupo repetido"]:
+        for esperado in ["nome de grupo", "e-mail inválido", "schema obrigatório", "tpm inválido", "grupo repetido", "warehouse obrigatório"]:
             self.assertIn(esperado, texto)
 
     def test_colunas_ausentes_e_bom(self):
-        _, erros = lib.parse_csv("grupo,emails\nx,a@x.com\n", D)
+        _, erros = lib.parse_csv("grupo,emails\nx,a@x.com\n")
         self.assertIn("colunas ausentes", erros[0])
-        grupos, erros = lib.parse_csv("﻿grupo,emails,schema,warehouse,modelos,tpm,qpm\nx,,s,,,,\n", D)
+        grupos, erros = lib.parse_csv("﻿grupo,emails,schema,warehouse,modelos,tpm,qpm\nx,,s,wh,,,\n")
         self.assertEqual((erros, grupos[0]["grupo"]), ([], "x"))
 
     def test_validate_models(self):
@@ -117,8 +118,8 @@ class TestRateLimits(unittest.TestCase):
         self.assertIsNone(lib.zero_limits_for(como_texto))
 
     def test_tpm_qpm_vazio_ou_zero_sem_limite(self):
-        txt = "grupo,emails,schema,warehouse,modelos,tpm,qpm\na,,s,,,0,\nb,,t,,,500,0\n"
-        g, e = lib.parse_csv(txt, D)
+        txt = "grupo,emails,schema,warehouse,modelos,tpm,qpm\na,,s,wh,,0,\nb,,t,wh,,500,0\n"
+        g, e = lib.parse_csv(txt)
         self.assertEqual((e, [(x["tpm"], x["qpm"]) for x in g]), ([], [(None, None), (500, None)]))
         self.assertEqual(lib.group_rate_limits("a", None, None), [])
         self.assertEqual(len(lib.group_rate_limits("b", 500, None)), 1)
@@ -163,6 +164,7 @@ class TestEtapas(unittest.TestCase):
         api = FakeApi(groups={"g": "1"}, users={"a@x.com": "2"}, assigned={"1"}, schemas={"cat.s"},
                       warehouses=[{"name": "wh", "id": "w1", "tags": {"custom_tags": [{"key": "budget", "value": "fin"}]}}],
                       services={"cat.s.genai_m"})
+        api.wh_acl = [{"group_name": "g", "all_permissions": [{"permission_level": "CAN_USE", "inherited": False}]}]
         self.assertEqual(lib.ensure_group(api, "g", True), ("existe", "1"))
         self.assertEqual(lib.ensure_user(api, "a@x.com", True), ("existe", "2"))
         self.assertEqual(lib.ensure_workspace_assignment(api, "1", ENT, True)[0], "existe")
@@ -223,9 +225,9 @@ class TestPolicy(unittest.TestCase):
 
     def test_csv_coluna_opcional(self):
         base = "grupo,emails,schema,warehouse,modelos,tpm,qpm"
-        g, e = lib.parse_csv(base + "\nx,,s,,,,\n", D)
+        g, e = lib.parse_csv(base + "\nx,,s,wh,,,\n")
         self.assertEqual((e, g[0]["usage_policy"]), ([], ""))
-        g, e = lib.parse_csv(base + ",usage_policy\nx,,s,,,,, exp_fin \n", D)
+        g, e = lib.parse_csv(base + ",usage_policy\nx,,s,wh,,,, exp_fin \n")
         self.assertEqual(g[0]["usage_policy"], "exp_fin")
 
 
@@ -244,20 +246,31 @@ class TestModelServiceLimits(unittest.TestCase):
         self.assertEqual(lib.ensure_model_service(api, "cat", "s", "g", "m", "models/x", 200, 5, False)[0], "atualizaria")
 
 
-class TestWarehouseTag(unittest.TestCase):
-    def test_tag_nova_mantem_outras_e_config(self):
-        wh = {"name": "wh", "id": "w1", "cluster_size": "2X-Small", "auto_stop_mins": 10,
-              "tags": {"custom_tags": [{"key": "grupo", "value": "x"}, {"key": "budget", "value": "antigo"}]}}
+class TestWarehouseExistente(unittest.TestCase):
+    def test_existente_so_concede_acesso(self):
+        wh = {"name": "wh", "id": "w1", "cluster_size": "Large", "enable_serverless_compute": False,
+              "tags": {"custom_tags": [{"key": "budget", "value": "outro"}]}}
         api = FakeApi(warehouses=[wh])
         self.assertEqual(lib.ensure_warehouse(api, "wh", "g", "budget", "fin", WH, False)[0], "atualizaria")
+        self.assertEqual(api.writes(), [])
         self.assertEqual(lib.ensure_warehouse(api, "wh", "g", "budget", "fin", WH, True)[0], "atualizado")
-        body = [c for c in api.calls if c[1].endswith("/edit")][0][2]
-        self.assertEqual(body["cluster_size"], "2X-Small")
-        self.assertEqual(body["tags"]["custom_tags"], [{"key": "grupo", "value": "x"}, {"key": "budget", "value": "fin"}])
+        self.assertEqual(api.writes(), [("PATCH", "/api/2.0/permissions/warehouses/w1",
+                                         {"access_control_list": [{"group_name": "g", "permission_level": "CAN_USE"}]})])
+
+    def test_existente_com_acesso_nao_regrava(self):
+        api = FakeApi(warehouses=[{"name": "wh", "id": "w1"}])
+        api.wh_acl = [{"group_name": "g", "all_permissions": [{"permission_level": "CAN_MANAGE", "inherited": False}]}]
+        self.assertEqual(lib.ensure_warehouse(api, "wh", "g", "budget", "fin", WH, True)[0], "existe")
+        self.assertEqual(api.writes(), [])
+
+    def test_acesso_herdado_nao_conta(self):
+        api = FakeApi(warehouses=[{"name": "wh", "id": "w1"}])
+        api.wh_acl = [{"group_name": "g", "all_permissions": [{"permission_level": "CAN_USE", "inherited": True}]}]
+        self.assertEqual(lib.ensure_warehouse(api, "wh", "g", "budget", "fin", WH, True)[0], "atualizado")
 
     def test_csv_budget_padrao_e_explicito(self):
         base = "grupo,emails,schema,warehouse,modelos,tpm,qpm,budget"
-        g, _ = lib.parse_csv(base + "\nfin_users,,s,,,,,\nrisco_users,,r,,,,,riscos\n", D)
+        g, _ = lib.parse_csv(base + "\nfin_users,,s,wh,,,,\nrisco_users,,r,wh,,,,riscos\n")
         self.assertEqual([x["budget"] for x in g], ["fin_users", "riscos"])
 
 
