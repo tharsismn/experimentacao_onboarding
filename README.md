@@ -86,3 +86,7 @@ Admins e owners passam por cima dos grants — a validação precisa ser feita p
 - Serverless usage policies não têm API de workspace para criação: são criadas na interface
   (ou pela API de account, com billing admin). Budgets também são configurados no account console.
 - Genie e Genie Code não passam pelo zero nem pelos limites por grupo (budget de Genie, por usuário).
+
+## Monitoramento de custos
+A pasta [`monitoramento/`](monitoramento/README.md) tem um notebook à parte que cria um dashboard de custos com todas as
+áreas e um dashboard por área (cada grupo vê só a sua), a partir da tag `budget`. Não depende deste notebook nem altera nada nele.
