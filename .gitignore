@@ -5,3 +5,5 @@ __pycache__/
 *.local.csv
 # script de publicação usado só nos testes locais
 *.local.sh
+# CSV real de cada ambiente (só no workspace): nunca versionar
+grupos.csv

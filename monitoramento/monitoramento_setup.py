@@ -4,26 +4,32 @@
 # MAGIC
 # MAGIC Cria a base do monitoramento, o **dashboard com todas as áreas** (admins) e **um dashboard por área**, em que o
 # MAGIC grupo da área vê só os custos da própria tag. Não depende do `onboarding_grupos` e não altera nada dele.
-# MAGIC Rode de novo sempre que incluir, remover ou mudar uma área (campo 6) — nada é duplicado.
+# MAGIC As áreas vêm do **mesmo `grupos.csv` do onboarding**: rode de novo sempre que o CSV mudar — nada é duplicado.
 # MAGIC
 # MAGIC **Primeiro rode a célula "Parâmetros"**: os campos aparecem no topo. Preencha-os e rode a célula 0 e as etapas
 # MAGIC em ordem (ou **Run all**).
 # MAGIC
 # MAGIC | Etapa | O que faz |
 # MAGIC |---|---|
-# MAGIC | 1. Schema e áreas | schema de monitoramento e a tabela `cad_areas` (as áreas do campo 6) |
+# MAGIC | 1. Schema e áreas | schema de monitoramento, `cad_areas` (as áreas do `grupos.csv`) e `cad_membros` (foto dos membros de cada área, para o Genie) |
 # MAGIC | 2. Materialized views | `mv_billing` (consumo + preço de tabela) e `mv_genai_uso` (chamadas e tokens): system tables filtradas **por este workspace**, com refresh agendado |
 # MAGIC | 3. Views e acessos | `vw_custo`, `vw_genai`, `vw_areas` (MV + área pela tag, com **filtro por linha**); `SELECT` nas views para o grupo de cada área |
-# MAGIC | 4. Dashboards | o geral (todas as áreas) e o de cada área (no warehouse da área, `CAN_RUN` só para o grupo dela) |
+# MAGIC | 4. Dashboards | o geral (todas as áreas; `CAN_RUN` só para o **grupo admin**, campo 5) e o de cada área (só os dados da área, no warehouse dela, `CAN_RUN` só para o grupo dela) |
 # MAGIC | 5. Resumo | tabela com todas as etapas executadas |
 # MAGIC
-# MAGIC **Campo 6 — áreas:** `tag=grupo=warehouse`, separados por vírgula. Ex.: `financas=fin_users=wh_financas, riscos=risco_users=wh_riscos`.
-# MAGIC - `tag`: valor da tag de custo (`budget`) dos recursos da área. É o que define a área de cada custo: valores que não
-# MAGIC   são de nenhuma área aparecem como "tag sem área"; consumo sem a tag, como "sem tag" (os dois só para os admins).
-# MAGIC - `grupo`: quem vê essa área (grupo de account já existente).
-# MAGIC - `warehouse`: onde rodam as consultas do dashboard da área (o grupo precisa ter acesso a ele).
+# MAGIC **Campo 6 — CSV do onboarding:** o `grupos.csv` já usado no `onboarding_grupos` (padrão `../grupos.csv`, a pasta
+# MAGIC do onboarding). De cada linha, o setup usa três colunas:
+# MAGIC - `budget` (vazia = nome do grupo): valor da tag de custo que define a área. Consumo sem a tag ou com um valor
+# MAGIC   que não é de nenhuma área aparece como "outros" (só para os admins);
+# MAGIC - `grupo`: quem vê a área;
+# MAGIC - `warehouse`: onde rodam as consultas do dashboard da área (o onboarding já deu acesso ao grupo).
 # MAGIC
-# MAGIC **Arquivos na mesma pasta:** este notebook, `monitoramento_lib.py` e `dashboard_custos.lvdash.json`.
+# MAGIC **Genie** (spaces, Genie Code, Genie One) e **chamadas diretas a `system.ai`** não têm tag: o custo e o uso vão para o `budget` da área do **usuário**
+# MAGIC (membro do grupo de uma única área; em mais de uma, aparece como "várias áreas", só para os admins). A foto dos
+# MAGIC membros é tirada a cada execução: se alguém mudar de grupo, rode o setup de novo.
+# MAGIC
+# MAGIC **Arquivos na mesma pasta:** este notebook, `monitoramento_lib.py`, `dashboard_custos.lvdash.json` (modelo do
+# MAGIC dashboard geral) e `dashboard_area.lvdash.json` (modelo do dashboard de cada área: só os dados da área, sem filtro de área).
 # MAGIC
 # MAGIC Quem executa: workspace admin, com `SELECT` em `system.billing`, `system.ai_gateway` e `system.query`, e
 # MAGIC `USE_CATALOG`/`CREATE_SCHEMA` no catálogo. As MVs e as views rodam com a identidade de quem as criou (o owner):
@@ -36,11 +42,11 @@ dbutils.widgets.dropdown("modo", "simular", ["simular", "aplicar"], "1. Modo")
 dbutils.widgets.text("catalogo", "", "2. Catálogo (já existente)")
 dbutils.widgets.text("schema", "monitoramento", "3. Schema de monitoramento")
 dbutils.widgets.text("warehouse", "", "4. Warehouse dos admins (nome; executa o setup e o dashboard dos admins)")
-dbutils.widgets.text("grupo_admin", "", "5. Grupo admin (vê todas as áreas; opcional)")
-dbutils.widgets.text("areas", "", "6. Áreas: tag=grupo=warehouse, separados por vírgula")
+dbutils.widgets.text("grupo_admin", "", "5. Grupo admin (único com acesso ao dashboard geral; vê todas as áreas)")
+dbutils.widgets.text("csv_path", "../grupos.csv", "6. CSV do onboarding (relativo a esta pasta ou caminho completo)")
 
 _faltando = [r for c, r in [("catalogo", "2. Catálogo"), ("warehouse", "4. Warehouse dos admins"),
-                            ("areas", "6. Áreas")]
+                            ("grupo_admin", "5. Grupo admin"), ("csv_path", "6. CSV do onboarding")]
              if not dbutils.widgets.get(c).strip()]
 print("Campos prontos no topo do notebook. Preencha-os e rode as próximas células (ou Run all).")
 print("⚠️ Obrigatório e ainda vazio: " + ", ".join(_faltando) if _faltando else "✔ Campos obrigatórios preenchidos.")
@@ -67,20 +73,41 @@ SCHEMA = dbutils.widgets.get("schema").strip() or "monitoramento"
 WAREHOUSE = dbutils.widgets.get("warehouse").strip()
 GRUPO_ADMIN = dbutils.widgets.get("grupo_admin").strip()
 
-import importlib, json, os, sys, time
+import base64, importlib, json, os, sys, time, types
 from urllib.parse import urlsplit, parse_qsl
-
-_nb = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
-NB_DIR = "/Workspace" + os.path.dirname(_nb)
-sys.path.insert(0, NB_DIR)
-import monitoramento_lib as mon
-importlib.reload(mon)
-AREAS, _erros_areas = mon.parse_areas(dbutils.widgets.get("areas"))
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import DatabricksError, NotFound
+from databricks.sdk.service.workspace import ExportFormat
 
 w = WorkspaceClient()
+
+_nb = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+NB_DIR = os.path.dirname(_nb if _nb.startswith("/Workspace/") else "/Workspace" + _nb)
+
+
+def ler_arquivo(caminho):
+    """Lê um arquivo do workspace. Em alguns ambientes serverless a sessão interativa não enxerga os arquivos da
+    pasta pelo sistema de arquivos: nesse caso, baixa pela API do workspace."""
+    try:
+        return open(caminho, encoding="utf-8").read()
+    except OSError:
+        if not caminho.startswith("/Workspace/"):
+            raise
+        r = w.workspace.export(caminho.removeprefix("/Workspace"), format=ExportFormat.AUTO)
+        return base64.b64decode(r.content).decode("utf-8")
+
+
+sys.path[:0] = [NB_DIR, os.getcwd()]
+try:
+    import monitoramento_lib as mon
+    importlib.reload(mon)
+except ModuleNotFoundError:
+    mon = types.ModuleType("monitoramento_lib")
+    exec(compile(ler_arquivo(os.path.join(NB_DIR, "monitoramento_lib.py")), "monitoramento_lib.py", "exec"), mon.__dict__)
+    sys.modules["monitoramento_lib"] = mon
+_csv = dbutils.widgets.get("csv_path").strip() or "../grupos.csv"
+CSV_PATH = _csv if _csv.startswith("/") else os.path.normpath(os.path.join(NB_DIR, _csv))
 
 
 def do(method, path, body=None):
@@ -148,19 +175,26 @@ if CATALOGO and not erros:
 WAREHOUSE_ID = mon.warehouse_id_by_name(do, WAREHOUSE) if WAREHOUSE else None
 if not WAREHOUSE_ID:
     erros.append(f"warehouse '{WAREHOUSE}' não encontrado (campo '4. Warehouse dos admins')")
-erros += [f"campo '6. Áreas': {e}" for e in _erros_areas]
+try:
+    AREAS, _erros_areas = mon.areas_do_csv(ler_arquivo(CSV_PATH))
+except Exception as e:
+    AREAS, _erros_areas = [], [f"não foi possível ler {CSV_PATH}: {e}"]
+erros += [f"CSV do onboarding: {e}" for e in _erros_areas]
 for a in AREAS:
     if not mon.group_exists(do, a["grupo"]):
         erros.append(f"área '{a['tag']}': grupo '{a['grupo']}' não existe")
     a["warehouse_id"] = mon.warehouse_id_by_name(do, a["warehouse"])
     if not a["warehouse_id"]:
-        erros.append(f"área '{a['tag']}': warehouse '{a['warehouse']}' não encontrado")
-if GRUPO_ADMIN and not mon.group_exists(do, GRUPO_ADMIN):
+        erros.append(f"área '{a['tag']}': warehouse '{a['warehouse']}' não encontrado (rode a etapa 3 do onboarding)")
+if not GRUPO_ADMIN:
+    erros.append("preencha o campo '5. Grupo admin': é o grupo que acessa o dashboard geral (todas as áreas)")
+elif not mon.group_exists(do, GRUPO_ADMIN):
     erros.append(f"grupo admin '{GRUPO_ADMIN}' não existe")
 try:
-    TEMPLATE = open(os.path.join(NB_DIR, "dashboard_custos.lvdash.json"), encoding="utf-8").read()
+    TEMPLATE = ler_arquivo(os.path.join(NB_DIR, "dashboard_custos.lvdash.json"))
+    TEMPLATE_AREA = ler_arquivo(os.path.join(NB_DIR, "dashboard_area.lvdash.json"))
 except Exception as e:
-    erros.append(f"modelo do dashboard não encontrado em {NB_DIR}: {e}")
+    erros.append(f"modelo de dashboard não encontrado em {NB_DIR}: {e}")
 
 EXECUTOR = w.current_user.me().user_name
 WORKSPACE_ID = str(w.get_workspace_id())
@@ -171,7 +205,8 @@ if erros:
     raise Exception("Validação falhou — corrija antes de continuar (nada foi alterado):\n- " + "\n- ".join(erros))
 print(f"✔ modo = {'APLICAR' if APLICAR else 'SIMULAR (nada é alterado)'} · workspace {WORKSPACE_ID} · "
       f"schema {SCHEMA_FULL} · warehouse {WAREHOUSE} ({WAREHOUSE_ID}) · refresh {CONFIG['refresh_cron']} {CONFIG['fuso']}")
-print(f"  dashboards em {PASTA_DASH} · grupo admin: {GRUPO_ADMIN or '— (só os admins do workspace)'}")
+print(f"  dashboards em {PASTA_DASH} · dashboard geral só para o grupo admin {GRUPO_ADMIN}")
+print(f"  áreas lidas de {CSV_PATH}:")
 for a in AREAS:
     print(f"  - área {a['tag']} (tag {CONFIG['tag_custo']}={a['tag']}): vê o grupo {a['grupo']}, dashboard no warehouse {a['warehouse']}")
 
@@ -199,6 +234,10 @@ registrar(ETAPA, SCHEMA_FULL, _schema, APLICAR)
 _query = lambda q: [r.asDict() for r in spark.sql(q).collect()]
 registrar(ETAPA, "cad_areas", mon.ensure_areas, _query, sql, SCHEMA_FULL, AREAS, EXECUTOR,
           bool(mon.get_table(do, f"{SCHEMA_FULL}.cad_areas")), APLICAR)
+# Genie não tem tag: a foto dos membros liga o usuário ao budget da área dele
+_membros = mon.membros_por_usuario(do, AREAS)
+registrar(ETAPA, "cad_membros", mon.ensure_membros, _query, sql, SCHEMA_FULL, _membros, EXECUTOR,
+          bool(mon.get_table(do, f"{SCHEMA_FULL}.cad_membros")), APLICAR)
 mostrar(ETAPA)
 
 # COMMAND ----------
@@ -217,7 +256,7 @@ ETAPA = nova_etapa("3. views e acessos")
 for nome, select in mon.view_definitions(SCHEMA_FULL, CONFIG["tag_custo"], GRUPO_ADMIN).items():
     registrar(ETAPA, nome, mon.ensure_view, do, sql, f"{SCHEMA_FULL}.{nome}", select, APLICAR)
 # Sempre confere os acessos: recriar uma view apaga as permissões dela.
-_grupos = list(dict.fromkeys(([GRUPO_ADMIN] if GRUPO_ADMIN else []) + [a["grupo"] for a in AREAS]))
+_grupos = list(dict.fromkeys([GRUPO_ADMIN] + [a["grupo"] for a in AREAS]))
 for grupo in _grupos:
     registrar(ETAPA, f"{grupo}: schema", mon.ensure_grant, do, "schema", SCHEMA_FULL, grupo, ["USE_SCHEMA"], APLICAR)
     for nome in mon.VIEWS:
@@ -231,16 +270,16 @@ mostrar(ETAPA)
 ETAPA = nova_etapa("4. dashboards")
 registrar(ETAPA, PASTA_DASH, mon.ensure_folder, do, PASTA_DASH, APLICAR)
 _links = []
-_paineis = [(CONFIG["titulo_admins"], WAREHOUSE_ID, GRUPO_ADMIN or None)]
+_paineis = [(CONFIG["titulo_admins"], WAREHOUSE_ID, GRUPO_ADMIN, TEMPLATE, None)]
 for a in AREAS:
     if not mon.group_can_use_warehouse(do, a["warehouse_id"], a["grupo"]):
         RESULTADO.append((ETAPA, a["warehouse"], "ALERTA",
                           f"o grupo {a['grupo']} não tem CAN_USE no warehouse {a['warehouse']}: o dashboard da área "
                           "não vai carregar para ele (o acesso ao warehouse é dado pelo onboarding_grupos)"))
-    _paineis.append((CONFIG["titulo_area"].format(area=a["tag"]), a["warehouse_id"], a["grupo"]))
-for titulo, wid, grupo in _paineis:
+    _paineis.append((CONFIG["titulo_area"].format(area=a["tag"]), a["warehouse_id"], a["grupo"], TEMPLATE_AREA, a["tag"]))
+for titulo, wid, grupo, modelo, area in _paineis:
     registrar(ETAPA, titulo, mon.ensure_dashboard, do, PASTA_DASH, titulo,
-              mon.render_dashboard(TEMPLATE, SCHEMA_FULL, titulo), wid, grupo, APLICAR)
+              mon.render_dashboard(modelo, SCHEMA_FULL, titulo, area), wid, grupo, APLICAR)
     _id = mon.find_dashboard_id(do, PASTA_DASH, titulo)
     if _id:
         _links.append((titulo, f"{w.config.host.rstrip('/')}/dashboardsv3/{_id}/published?o={WORKSPACE_ID}"))

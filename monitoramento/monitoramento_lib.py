@@ -4,13 +4,16 @@ Backend do notebook monitoramento_setup (não depende do onboarding_grupos).
 
 Camadas, todas no schema de monitoramento (`<catálogo>.<schema>`):
 - materialized views filtradas pelo workspace (mv_*): cópia enxuta das system tables, com refresh agendado;
-- cad_areas: as áreas (valor da tag de custo × grupo × warehouse), informadas no notebook;
+- cad_areas: as áreas (valor da tag de custo × grupo × warehouse), lidas do grupos.csv do onboarding;
+- cad_membros: foto dos membros de cada área (usuário → budget), usada só para o Genie, que não tem tag;
 - views de negócio (vw_*): custo por área = valor da tag de custo (ex.: budget), se for de uma área cadastrada; com
   filtro por linha (cada grupo vê só a tag da própria área; admins veem tudo). São as únicas que os grupos leem.
 
 As funções idempotentes consultam antes de criar ou alterar. SQL passa por `sql(statement)` e chamadas de API
 por `do(method, path, body=None)`; no notebook são spark.sql e o api_client do WorkspaceClient, nos testes, fakes.
 """
+import csv
+import io
 import json
 import re
 from urllib.parse import quote
@@ -19,6 +22,7 @@ MVS = ["mv_billing", "mv_genai_uso"]
 VIEWS = ["vw_custo", "vw_genai", "vw_areas"]   # as que os grupos leem
 PLACEHOLDER_SCHEMA = "__SCHEMA_MONITORAMENTO__"
 PLACEHOLDER_TITULO = "__TITULO__"
+PLACEHOLDER_AREA = "__AREA__"   # só no modelo do dashboard da área
 
 _IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -57,6 +61,8 @@ def mv_definitions(workspace_id):
   u.identity_metadata.run_as AS run_as,
   u.usage_metadata.warehouse_id AS warehouse_id,
   coalesce(u.usage_metadata.ai_gateway.endpoint_name, u.usage_metadata.endpoint_name) AS endpoint,
+  u.usage_metadata.ai_gateway.destination_model AS modelo,
+  u.usage_metadata.genie.surface AS genie_surface,
   u.usage_metadata.notebook_id AS notebook_id,
   u.usage_metadata.job_id AS job_id,
   u.usage_metadata.dlt_pipeline_id AS pipeline_id,
@@ -115,26 +121,36 @@ def ensure_mv(do, sql, full_name, select, cron, fuso, aplicar):
 
 # ------------------------------------------------------------------ cadastro ----
 
-def parse_areas(texto):
-    """Campo 'tag=grupo=warehouse' separado por vírgula ou quebra de linha. Devolve (areas, erros)."""
+def areas_do_csv(texto):
+    """Áreas a partir do CSV do onboarding_grupos (grupos.csv): tag = coluna budget (vazia = nome do grupo, a mesma
+    regra do onboarding), grupo = coluna grupo, warehouse = coluna warehouse. Devolve (areas, erros)."""
+    leitor = csv.DictReader(io.StringIO((texto or "").lstrip("\ufeff")))
+    faltam = [c for c in ("grupo", "warehouse") if c not in (leitor.fieldnames or [])]
+    if faltam:
+        return [], [f"colunas ausentes no CSV: {', '.join(faltam)}"]
     areas, erros = [], []
-    for n, item in enumerate([i.strip() for i in re.split(r"[,\n]", texto or "") if i.strip()], start=1):
-        partes = [p.strip() for p in item.split("=")]
-        if len(partes) != 3 or not all(partes):
-            erros.append(f"área {n} ('{item}'): use tag=grupo=warehouse")
+    for n, linha in enumerate(leitor, start=2):
+        grupo = (linha.get("grupo") or "").strip()
+        if not grupo:
             continue
-        tag, grupo, warehouse = partes
-        if any(a["tag"] == tag for a in areas):
-            erros.append(f"área {n}: tag '{tag}' repetida")
+        tag = (linha.get("budget") or "").strip() or grupo
+        warehouse = (linha.get("warehouse") or "").strip()
+        if not warehouse:
+            erros.append(f"linha {n} ({grupo}): sem warehouse")
+            continue
+        outra = next((a for a in areas if a["tag"] == tag), None)
+        if outra:
+            erros.append(f"linha {n} ({grupo}): budget '{tag}' já é do grupo {outra['grupo']} — cada grupo deve ter "
+                         "o próprio budget; corrija o CSV")
             continue
         areas.append({"tag": tag, "grupo": grupo, "warehouse": warehouse})
     if not areas and not erros:
-        erros.append("informe ao menos uma área no formato tag=grupo=warehouse")
+        erros.append("CSV sem grupos")
     return areas, erros
 
 
 def ensure_areas(query, sql, schema_full, areas, executor, tabela_existe, aplicar):
-    """Regrava cad_areas com as áreas do campo (só quando mudou). areas: dicts com tag, grupo, warehouse,
+    """Regrava cad_areas com as áreas do CSV (só quando mudou). areas: dicts com tag, grupo, warehouse,
     warehouse_id. Tabela sem grants de grupos (só as views são lidas), então recriá-la não tira acessos."""
     chave = lambda a: (a["tag"], a["grupo"], a["warehouse"], a.get("warehouse_id") or "")
     atuais = sorted((r["budget"], r["grupo"], r["warehouse"], r.get("warehouse_id") or "")
@@ -164,31 +180,38 @@ def admin_expr(grupo_admin):
 
 
 def view_definitions(schema_full, tag_custo, grupo_admin):
-    """Área = a área de cad_areas com a mesma tag de custo da linha. Cada linha só aparece para o grupo da área
-    dela (is_account_group_member) e para os admins."""
+    """Área = a área de cad_areas com a mesma tag de custo da linha; para o Genie e as chamadas diretas a system.ai
+    (sem tag), o budget do usuário em cad_membros. Cada linha só aparece para o grupo da área dela (is_account_group_member) e para os admins."""
     s, adm, tag = schema_full, admin_expr(grupo_admin), _lit(tag_custo)
-    vw_custo = f"""SELECT b.usage_date AS data, a.budget AS area, b.custom_tags[{tag}] AS tag,
+    vw_custo = f"""SELECT b.usage_date AS data, coalesce(a.budget, m.budget) AS area, b.custom_tags[{tag}] AS tag,
   CASE WHEN a.budget IS NOT NULL THEN 'tag da área'
-       WHEN b.custom_tags[{tag}] IS NOT NULL THEN 'tag sem área'
-       ELSE 'sem tag' END AS origem,
-  lower(b.run_as) AS usuario, b.produto,
+       WHEN m.budget IS NOT NULL THEN 'usuário da área'
+       WHEN m.usuario IS NOT NULL THEN 'várias áreas'
+       ELSE 'outros' END AS origem,
+  lower(b.run_as) AS usuario, b.produto, b.sku_name, b.modelo, b.genie_surface,
   coalesce(b.endpoint, concat('warehouse ', b.warehouse_id), concat('job ', b.job_id),
            concat('notebook ', b.notebook_id), concat('pipeline ', b.pipeline_id), b.sku_name) AS recurso,
   b.quantidade, coalesce(b.custo_lista_usd, 0) AS custo_usd
 FROM {s}.mv_billing b
 LEFT JOIN {s}.cad_areas a ON a.budget = b.custom_tags[{tag}]
-WHERE is_account_group_member(a.grupo) OR {adm}"""
-    vw_genai = f"""SELECT g.data, a.budget AS area, g.service_tags[{tag}] AS tag,
+-- Genie e chamadas diretas a system.ai não têm tag: a área vem do usuário (membro de um único grupo de área)
+LEFT JOIN {s}.cad_membros m ON (b.produto = 'GENIE' OR b.endpoint LIKE 'system.ai.%')
+  AND b.custom_tags[{tag}] IS NULL AND m.usuario = lower(b.run_as)
+WHERE is_account_group_member(coalesce(a.grupo, m.grupo)) OR {adm}"""
+    vw_genai = f"""SELECT g.data,
+  coalesce(a.budget, m.budget, CASE WHEN m.usuario IS NOT NULL THEN '(várias áreas)' END) AS area,
+  g.service_tags[{tag}] AS tag,
   CASE WHEN g.endpoint_name LIKE 'system.ai.%' THEN 'system.ai direto'
        WHEN a.budget IS NOT NULL THEN 'tag da área'
-       WHEN g.service_tags[{tag}] IS NOT NULL THEN 'tag sem área'
-       ELSE 'sem tag' END AS origem,
+       ELSE 'outros' END AS origem,
   lower(g.requester) AS usuario, g.endpoint_name, g.modelo,
   coalesce(g.total_tokens, 0) AS total_tokens, g.status_code,
   CASE WHEN g.status_code = 429 THEN 1 ELSE 0 END AS bloqueada_rate_limit
 FROM {s}.mv_genai_uso g
 LEFT JOIN {s}.cad_areas a ON a.budget = g.service_tags[{tag}]
-WHERE is_account_group_member(a.grupo) OR {adm}"""
+-- chamadas diretas a system.ai não têm tag: a área vem do usuário
+LEFT JOIN {s}.cad_membros m ON g.endpoint_name LIKE 'system.ai.%' AND m.usuario = lower(g.requester)
+WHERE is_account_group_member(coalesce(a.grupo, m.grupo)) OR {adm}"""
     vw_areas = f"""SELECT budget AS area, grupo, warehouse, atualizado_em
 FROM {s}.cad_areas
 WHERE is_account_group_member(grupo) OR {adm}"""
@@ -206,13 +229,80 @@ def ensure_view(do, sql, full_name, select, aplicar):
     return acao + "ado", full_name
 
 
+# ------------------------------------------------------------------ membros ----
+
+def _grupo_id(do, nome):
+    r = do("GET", "/api/2.0/identity/groups?filter=" + quote(f'group_name eq "{nome}"'))
+    grupos = r.get("groups", [])
+    return grupos[0]["group_id"] if grupos else None
+
+
+def membros_do_grupo(do, group_id, _visitados=None):
+    """Identificadores (como aparecem no billing) dos membros do grupo, incluindo os de grupos dentro dele:
+    e-mail dos usuários e application ID dos service principals."""
+    visitados = _visitados if _visitados is not None else set()
+    if group_id in visitados:
+        return set()
+    visitados.add(group_id)
+    ids, token = set(), None
+    while True:
+        r = do("GET", f"/api/2.0/identity/groups/{group_id}/direct-members" + (f"?page_token={token}" if token else ""))
+        for m in r.get("direct_group_members", []):
+            tipo, pid = m.get("principal_type"), m.get("principal_id")
+            if tipo == "USER":
+                ids.add(do("GET", f"/api/2.0/identity/users/{pid}")["username"].lower())
+            elif tipo == "SERVICE_PRINCIPAL":
+                sp = do("GET", f"/api/2.0/identity/service-principals/{pid}")
+                ids.add(str(sp.get("application_id") or sp.get("applicationId")).lower())
+            elif tipo == "GROUP":
+                ids |= membros_do_grupo(do, pid, visitados)
+        token = r.get("next_page_token")
+        if not token:
+            return ids
+
+
+def membros_por_usuario(do, areas):
+    """Uma linha por usuário: o budget e o grupo da área dele, ou vazios se ele estiver em mais de uma área."""
+    por_usuario = {}
+    for a in areas:
+        gid = _grupo_id(do, a["grupo"])
+        for u in (membros_do_grupo(do, gid) if gid else set()):
+            por_usuario.setdefault(u, []).append(a)
+    return [{"usuario": u, "budget": l[0]["tag"] if len(l) == 1 else None,
+             "grupo": l[0]["grupo"] if len(l) == 1 else None, "n_areas": len(l)}
+            for u, l in sorted(por_usuario.items())]
+
+
+def ensure_membros(query, sql, schema_full, linhas, executor, tabela_existe, aplicar):
+    """Regrava cad_membros (foto atual dos membros) só quando mudou."""
+    chave = lambda r: (r["usuario"], r.get("budget") or "", int(r["n_areas"]))
+    atuais = sorted(chave(r) for r in query(f"SELECT * FROM {schema_full}.cad_membros")) if tabela_existe else None
+    varias = sum(1 for r in linhas if r["n_areas"] > 1)
+    det = f"{len(linhas)} usuário(s)" + (f", {varias} em mais de uma área" if varias else "")
+    if atuais == sorted(chave(r) for r in linhas):
+        return "existe", det
+    acao = "atualiz" if tabela_existe else "cri"
+    if not aplicar:
+        return acao + "aria", det
+    sql(f"""CREATE OR REPLACE TABLE {schema_full}.cad_membros (
+  usuario STRING, budget STRING, grupo STRING, n_areas INT, atualizado_em TIMESTAMP, atualizado_por STRING)
+COMMENT 'Foto dos membros das áreas (atualizada a cada execução do setup): liga o Genie, que não tem tag, ao budget'""")
+    if linhas:
+        lit = lambda v: _lit(v) if v else "NULL"
+        sql(f"INSERT INTO {schema_full}.cad_membros VALUES " + ", ".join(
+            f"({_lit(r['usuario'])}, {lit(r.get('budget'))}, {lit(r.get('grupo'))}, {int(r['n_areas'])}, "
+            f"current_timestamp(), {_lit(executor)})" for r in linhas))
+    return acao + "ado", det
+
+
 # ------------------------------------------------------------------- grants ----
 
 def _privilegios_atuais(do, securable, full_name, principal):
     try:
         perms = do("GET", f"/api/2.1/unity-catalog/permissions/{securable}/{full_name}?principal={quote(principal)}")
     except Exception as e:
-        if "could not find principal" in str(e).lower():   # grupo ainda não criado (modo simular)
+        # grupo, schema ou view ainda não criados (instalação nova, modo simular): ainda não há permissões
+        if "could not find principal" in str(e).lower() or _not_found(e):
             return set()
         raise
     return {p for a in perms.get("privilege_assignments", []) if a.get("principal") == principal
@@ -232,11 +322,24 @@ def ensure_grant(do, securable, full_name, principal, privileges, aplicar):
 
 # --------------------------------------------------------------- dashboards ----
 
-def render_dashboard(template_text, schema_full, titulo):
-    """Troca os marcadores do modelo (schema de monitoramento e título) e valida o JSON resultante."""
-    texto = template_text.replace(PLACEHOLDER_SCHEMA, schema_full).replace(PLACEHOLDER_TITULO, titulo)
-    json.loads(texto)
-    return texto
+def render_dashboard(template_text, schema_full, titulo, area=None):
+    """Troca os marcadores do modelo — schema de monitoramento, título e, no modelo da área, a tag da área (dentro de
+    um literal SQL, com as aspas escapadas) — campo a campo, no JSON já interpretado."""
+    trocas = [(PLACEHOLDER_SCHEMA, schema_full), (PLACEHOLDER_TITULO, titulo)]
+    if area is not None:
+        trocas.append((PLACEHOLDER_AREA, area.replace("\\", "\\\\").replace("'", "\\'")))
+
+    def trocar(v):
+        if isinstance(v, str):
+            for de, para in trocas:
+                v = v.replace(de, para)
+            return v
+        if isinstance(v, list):
+            return [trocar(x) for x in v]
+        if isinstance(v, dict):
+            return {k: trocar(x) for k, x in v.items()}
+        return v
+    return json.dumps(trocar(json.loads(template_text)), ensure_ascii=False)
 
 
 def _json_ou_texto(texto):

@@ -4,21 +4,21 @@
       "name": "ds_custo",
       "displayName": "ds_custo",
       "queryLines": [
-        "SELECT data, coalesce(area, concat('(', origem, ')')) AS area, coalesce(usuario, '—') AS usuario, produto, origem, tag, recurso, quantidade, custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_custo\n"
-      ]
-    },
-    {
-      "name": "ds_custo_genai",
-      "displayName": "ds_custo_genai",
-      "queryLines": [
-        "SELECT * FROM (SELECT data, coalesce(area, concat('(', origem, ')')) AS area, coalesce(usuario, '—') AS usuario, produto, origem, tag, recurso, quantidade, custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_custo) WHERE produto IN ('MODEL_SERVING', 'AI_GATEWAY')\n"
+        "SELECT data, coalesce(area, CASE WHEN origem = 'várias áreas' THEN '(várias áreas)' ELSE '(outros)' END) AS area, coalesce(usuario, '—') AS usuario, produto, origem, tag, recurso, quantidade, custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_custo\n"
       ]
     },
     {
       "name": "ds_genai",
       "displayName": "ds_genai",
       "queryLines": [
-        "SELECT data, coalesce(area, concat('(', origem, ')')) AS area, coalesce(usuario, '—') AS usuario, coalesce(modelo, '(não informado)') AS modelo, endpoint_name, origem, total_tokens, 1 AS chamadas, bloqueada_rate_limit FROM __SCHEMA_MONITORAMENTO__.vw_genai\n"
+        "SELECT data, coalesce(area, CASE WHEN origem = 'várias áreas' THEN '(várias áreas)' ELSE '(outros)' END) AS area, coalesce(usuario, '—') AS usuario, coalesce(modelo, '(não informado)') AS modelo, endpoint_name, origem, total_tokens, 1 AS chamadas, bloqueada_rate_limit, 0.0 AS custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_genai UNION ALL SELECT data, coalesce(area, CASE WHEN origem = 'várias áreas' THEN '(várias áreas)' ELSE '(outros)' END) AS area, coalesce(usuario, '—') AS usuario, coalesce(modelo, '(não informado)') AS modelo, recurso AS endpoint_name, origem, 0 AS total_tokens, 0 AS chamadas, 0 AS bloqueada_rate_limit, custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_custo WHERE produto IN ('MODEL_SERVING', 'AI_GATEWAY')\n"
+      ]
+    },
+    {
+      "name": "ds_genie",
+      "displayName": "ds_genie",
+      "queryLines": [
+        "SELECT data, coalesce(area, CASE WHEN origem = 'várias áreas' THEN '(várias áreas)' ELSE '(outros)' END) AS area, coalesce(usuario, '—') AS usuario, sku_name, CASE genie_surface WHEN 'GENIE_AGENTS' THEN 'Genie spaces' WHEN 'GENIE_CODE' THEN 'Genie Code' WHEN 'GENIE_ONE' THEN 'Genie One' ELSE coalesce(genie_surface, '(não informado)') END AS surface, quantidade, custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_custo WHERE produto = 'GENIE' AND sku_name <> 'GENIE_FREE_USAGE'\n"
       ]
     },
     {
@@ -26,11 +26,8 @@
       "displayName": "ds_kpi_mes",
       "queryLines": [
         "SELECT area,\n",
-        "  sum(CASE WHEN date_trunc('MONTH', data) = date_trunc('MONTH', current_date()) THEN custo_usd ELSE 0 END) AS mes_atual,\n",
-        "  sum(CASE WHEN date_trunc('MONTH', data) = date_trunc('MONTH', add_months(current_date(), -1)) THEN custo_usd ELSE 0 END) AS mes_anterior,\n",
-        "  sum(CASE WHEN date_trunc('MONTH', data) = date_trunc('MONTH', current_date()) THEN custo_usd ELSE 0 END)\n",
-        "    / day(current_date()) * day(last_day(current_date())) AS projecao_mes\n",
-        "FROM (SELECT data, coalesce(area, concat('(', origem, ')')) AS area, coalesce(usuario, '—') AS usuario, produto, origem, tag, recurso, quantidade, custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_custo) GROUP BY area\n"
+        "  sum(CASE WHEN date_trunc('MONTH', data) = date_trunc('MONTH', current_date()) THEN custo_usd ELSE 0 END) AS mes_atual\n",
+        "FROM (SELECT data, coalesce(area, CASE WHEN origem = 'várias áreas' THEN '(várias áreas)' ELSE '(outros)' END) AS area, coalesce(usuario, '—') AS usuario, produto, origem, tag, recurso, quantidade, custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_custo) GROUP BY area\n"
       ]
     },
     {
@@ -38,7 +35,7 @@
       "displayName": "ds_tab_area",
       "queryLines": [
         "SELECT area, produto, origem, round(sum(quantidade), 2) AS quantidade, round(sum(custo_usd), 2) AS custo_usd\n",
-        "FROM (SELECT data, coalesce(area, concat('(', origem, ')')) AS area, coalesce(usuario, '—') AS usuario, produto, origem, tag, recurso, quantidade, custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_custo) WHERE data BETWEEN :periodo.min AND :periodo.max GROUP BY area, produto, origem ORDER BY custo_usd DESC\n"
+        "FROM (SELECT data, coalesce(area, CASE WHEN origem = 'várias áreas' THEN '(várias áreas)' ELSE '(outros)' END) AS area, coalesce(usuario, '—') AS usuario, produto, origem, tag, recurso, quantidade, custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_custo) WHERE data BETWEEN :periodo.min AND :periodo.max GROUP BY area, produto, origem ORDER BY custo_usd DESC\n"
       ],
       "parameters": [
         {
@@ -65,7 +62,35 @@
       "displayName": "ds_tab_usuario",
       "queryLines": [
         "SELECT usuario, area, produto, recurso, round(sum(quantidade), 2) AS quantidade, round(sum(custo_usd), 2) AS custo_usd\n",
-        "FROM (SELECT data, coalesce(area, concat('(', origem, ')')) AS area, coalesce(usuario, '—') AS usuario, produto, origem, tag, recurso, quantidade, custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_custo) WHERE data BETWEEN :periodo.min AND :periodo.max GROUP BY usuario, area, produto, recurso ORDER BY custo_usd DESC\n"
+        "FROM (SELECT data, coalesce(area, CASE WHEN origem = 'várias áreas' THEN '(várias áreas)' ELSE '(outros)' END) AS area, coalesce(usuario, '—') AS usuario, produto, origem, tag, recurso, quantidade, custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_custo) WHERE data BETWEEN :periodo.min AND :periodo.max GROUP BY usuario, area, produto, recurso ORDER BY custo_usd DESC\n"
+      ],
+      "parameters": [
+        {
+          "displayName": "periodo",
+          "keyword": "periodo",
+          "dataType": "DATE",
+          "complexType": "RANGE",
+          "defaultSelection": {
+            "range": {
+              "dataType": "DATE",
+              "min": {
+                "value": "now-30d/d"
+              },
+              "max": {
+                "value": "now/d"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "ds_tab_system_ai_area",
+      "displayName": "ds_tab_system_ai_area",
+      "queryLines": [
+        "SELECT area, sum(chamadas) AS chamadas, sum(total_tokens) AS tokens\n",
+        "FROM (SELECT data, coalesce(area, CASE WHEN origem = 'várias áreas' THEN '(várias áreas)' ELSE '(outros)' END) AS area, coalesce(usuario, '—') AS usuario, coalesce(modelo, '(não informado)') AS modelo, endpoint_name, origem, total_tokens, 1 AS chamadas, bloqueada_rate_limit, 0.0 AS custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_genai UNION ALL SELECT data, coalesce(area, CASE WHEN origem = 'várias áreas' THEN '(várias áreas)' ELSE '(outros)' END) AS area, coalesce(usuario, '—') AS usuario, coalesce(modelo, '(não informado)') AS modelo, recurso AS endpoint_name, origem, 0 AS total_tokens, 0 AS chamadas, 0 AS bloqueada_rate_limit, custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_custo WHERE produto IN ('MODEL_SERVING', 'AI_GATEWAY')) WHERE origem = 'system.ai direto' AND chamadas > 0 AND data BETWEEN :periodo.min AND :periodo.max\n",
+        "GROUP BY area ORDER BY chamadas DESC\n"
       ],
       "parameters": [
         {
@@ -91,10 +116,9 @@
       "name": "ds_tab_system_ai",
       "displayName": "ds_tab_system_ai",
       "queryLines": [
-        "SELECT usuario, area, modelo, endpoint_name, sum(chamadas) AS chamadas, sum(total_tokens) AS tokens,\n",
-        "  sum(bloqueada_rate_limit) AS bloqueadas\n",
-        "FROM (SELECT data, coalesce(area, concat('(', origem, ')')) AS area, coalesce(usuario, '—') AS usuario, coalesce(modelo, '(não informado)') AS modelo, endpoint_name, origem, total_tokens, 1 AS chamadas, bloqueada_rate_limit FROM __SCHEMA_MONITORAMENTO__.vw_genai) WHERE origem = 'system.ai direto' AND data BETWEEN :periodo.min AND :periodo.max\n",
-        "GROUP BY usuario, area, modelo, endpoint_name ORDER BY chamadas DESC\n"
+        "SELECT usuario, area, sum(chamadas) AS chamadas, sum(total_tokens) AS tokens\n",
+        "FROM (SELECT data, coalesce(area, CASE WHEN origem = 'várias áreas' THEN '(várias áreas)' ELSE '(outros)' END) AS area, coalesce(usuario, '—') AS usuario, coalesce(modelo, '(não informado)') AS modelo, endpoint_name, origem, total_tokens, 1 AS chamadas, bloqueada_rate_limit, 0.0 AS custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_genai UNION ALL SELECT data, coalesce(area, CASE WHEN origem = 'várias áreas' THEN '(várias áreas)' ELSE '(outros)' END) AS area, coalesce(usuario, '—') AS usuario, coalesce(modelo, '(não informado)') AS modelo, recurso AS endpoint_name, origem, 0 AS total_tokens, 0 AS chamadas, 0 AS bloqueada_rate_limit, custo_usd FROM __SCHEMA_MONITORAMENTO__.vw_custo WHERE produto IN ('MODEL_SERVING', 'AI_GATEWAY')) WHERE origem = 'system.ai direto' AND chamadas > 0 AND data BETWEEN :periodo.min AND :periodo.max\n",
+        "GROUP BY usuario, area ORDER BY chamadas DESC\n"
       ],
       "parameters": [
         {
@@ -180,7 +204,7 @@
               "encodings": {
                 "value": {
                   "fieldName": "sum(custo_usd)",
-                  "displayName": "Custo no período",
+                  "displayName": "Custo no período selecionado (filtro Período)",
                   "format": {
                     "type": "number-currency",
                     "currencyCode": "USD",
@@ -193,7 +217,7 @@
                 }
               },
               "frame": {
-                "title": "Custo no período",
+                "title": "Custo no período selecionado (filtro Período)",
                 "showTitle": true
               }
             }
@@ -201,7 +225,7 @@
           "position": {
             "x": 0,
             "y": 2,
-            "width": 4,
+            "width": 6,
             "height": 3
           }
         },
@@ -229,7 +253,7 @@
               "encodings": {
                 "value": {
                   "fieldName": "sum(mes_atual)",
-                  "displayName": "Mês atual",
+                  "displayName": "Mês atual (MTD)",
                   "format": {
                     "type": "number-currency",
                     "currencyCode": "USD",
@@ -242,64 +266,15 @@
                 }
               },
               "frame": {
-                "title": "Mês atual",
+                "title": "Mês atual (MTD)",
                 "showTitle": true
               }
             }
           },
           "position": {
-            "x": 4,
+            "x": 6,
             "y": 2,
-            "width": 4,
-            "height": 3
-          }
-        },
-        {
-          "widget": {
-            "name": "kpi_projecao",
-            "queries": [
-              {
-                "name": "main_query",
-                "query": {
-                  "datasetName": "ds_kpi_mes",
-                  "fields": [
-                    {
-                      "name": "sum(projecao_mes)",
-                      "expression": "SUM(`projecao_mes`)"
-                    }
-                  ],
-                  "disaggregated": false
-                }
-              }
-            ],
-            "spec": {
-              "version": 2,
-              "widgetType": "counter",
-              "encodings": {
-                "value": {
-                  "fieldName": "sum(projecao_mes)",
-                  "displayName": "Projeção do mês",
-                  "format": {
-                    "type": "number-currency",
-                    "currencyCode": "USD",
-                    "abbreviation": "compact",
-                    "decimalPlaces": {
-                      "type": "max",
-                      "places": 2
-                    }
-                  }
-                }
-              },
-              "frame": {
-                "title": "Projeção do mês",
-                "showTitle": true
-              }
-            }
-          },
-          "position": {
-            "x": 8,
-            "y": 2,
-            "width": 4,
+            "width": 6,
             "height": 3
           }
         },
@@ -869,7 +844,8 @@
                 "columns": [
                   {
                     "fieldName": "usuario",
-                    "displayName": "usuario"
+                    "displayName": "usuario",
+                    "useForSearch": true
                   },
                   {
                     "fieldName": "area",
@@ -916,6 +892,55 @@
       "layout": [
         {
           "widget": {
+            "name": "kpi_custo_genai",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_genai",
+                  "fields": [
+                    {
+                      "name": "sum(custo_usd)",
+                      "expression": "SUM(`custo_usd`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(custo_usd)",
+                  "displayName": "Custo total de GenAI",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "title": "Custo total de GenAI",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
             "name": "kpi_tokens",
             "queries": [
               {
@@ -956,9 +981,9 @@
             }
           },
           "position": {
-            "x": 0,
+            "x": 3,
             "y": 0,
-            "width": 4,
+            "width": 3,
             "height": 3
           }
         },
@@ -1004,9 +1029,9 @@
             }
           },
           "position": {
-            "x": 4,
+            "x": 6,
             "y": 0,
-            "width": 4,
+            "width": 3,
             "height": 3
           }
         },
@@ -1052,9 +1077,9 @@
             }
           },
           "position": {
-            "x": 8,
+            "x": 9,
             "y": 0,
-            "width": 4,
+            "width": 3,
             "height": 3
           }
         },
@@ -1141,7 +1166,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "ds_custo_genai",
+                  "datasetName": "ds_genai",
                   "fields": [
                     {
                       "name": "area",
@@ -1152,8 +1177,8 @@
                       "expression": "SUM(`custo_usd`)"
                     },
                     {
-                      "name": "origem",
-                      "expression": "`origem`"
+                      "name": "modelo",
+                      "expression": "`modelo`"
                     }
                   ],
                   "disaggregated": false
@@ -1191,11 +1216,11 @@
                   "displayName": "area"
                 },
                 "color": {
-                  "fieldName": "origem",
+                  "fieldName": "modelo",
                   "scale": {
                     "type": "categorical"
                   },
-                  "displayName": "origem"
+                  "displayName": "modelo"
                 }
               },
               "frame": {
@@ -1216,7 +1241,7 @@
             "name": "genai_obs",
             "multilineTextboxSpec": {
               "lines": [
-                "**Uso direto de system.ai** — com o zero aplicado (etapa 4 do onboarding), o uso deveria passar só pelos model services das áreas."
+                "**Acesso direto aos modelos de IA** (sem passar pelo model service da área) — com o zero aplicado (etapa 4 do onboarding), deveria ficar vazio."
               ]
             }
           },
@@ -1225,6 +1250,64 @@
             "y": 9,
             "width": 12,
             "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "tab_system_ai_area",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_tab_system_ai_area",
+                  "fields": [
+                    {
+                      "name": "area",
+                      "expression": "`area`"
+                    },
+                    {
+                      "name": "chamadas",
+                      "expression": "`chamadas`"
+                    },
+                    {
+                      "name": "tokens",
+                      "expression": "`tokens`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "area",
+                    "displayName": "Área"
+                  },
+                  {
+                    "fieldName": "chamadas",
+                    "displayName": "Chamadas"
+                  },
+                  {
+                    "fieldName": "tokens",
+                    "displayName": "Tokens"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Acesso direto aos modelos de IA — por área (período selecionado)",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 10,
+            "width": 12,
+            "height": 5
           }
         },
         {
@@ -1241,28 +1324,12 @@
                       "expression": "`usuario`"
                     },
                     {
-                      "name": "area",
-                      "expression": "`area`"
-                    },
-                    {
-                      "name": "modelo",
-                      "expression": "`modelo`"
-                    },
-                    {
-                      "name": "endpoint_name",
-                      "expression": "`endpoint_name`"
-                    },
-                    {
                       "name": "chamadas",
                       "expression": "`chamadas`"
                     },
                     {
                       "name": "tokens",
                       "expression": "`tokens`"
-                    },
-                    {
-                      "name": "bloqueadas",
-                      "expression": "`bloqueadas`"
                     }
                   ],
                   "disaggregated": true
@@ -1276,36 +1343,370 @@
                 "columns": [
                   {
                     "fieldName": "usuario",
-                    "displayName": "usuario"
-                  },
-                  {
-                    "fieldName": "area",
-                    "displayName": "area"
-                  },
-                  {
-                    "fieldName": "modelo",
-                    "displayName": "modelo"
-                  },
-                  {
-                    "fieldName": "endpoint_name",
-                    "displayName": "endpoint_name"
+                    "displayName": "Usuário",
+                    "useForSearch": true
                   },
                   {
                     "fieldName": "chamadas",
-                    "displayName": "chamadas"
+                    "displayName": "Chamadas"
                   },
                   {
                     "fieldName": "tokens",
-                    "displayName": "tokens"
-                  },
-                  {
-                    "fieldName": "bloqueadas",
-                    "displayName": "bloqueadas"
+                    "displayName": "Tokens"
                   }
                 ]
               },
               "frame": {
-                "title": "Chamadas diretas a system.ai (período selecionado)",
+                "title": "Acesso direto aos modelos de IA — por usuário (período selecionado)",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 15,
+            "width": 12,
+            "height": 6
+          }
+        }
+      ]
+    },
+    {
+      "name": "genie",
+      "displayName": "Genie",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "genie_obs",
+            "multilineTextboxSpec": {
+              "lines": [
+                "Custo do Genie (spaces, Genie Code e Genie One) **acima da cota gratuita**. O Genie não tem tag: o custo vai para o budget da área do usuário."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_custo_genie",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_genie",
+                  "fields": [
+                    {
+                      "name": "sum(custo_usd)",
+                      "expression": "SUM(`custo_usd`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(custo_usd)",
+                  "displayName": "Custo total do Genie",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "title": "Custo total do Genie",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 6,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_dbus_genie",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_genie",
+                  "fields": [
+                    {
+                      "name": "sum(quantidade)",
+                      "expression": "SUM(`quantidade`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(quantidade)",
+                  "displayName": "DBUs do Genie",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "title": "DBUs do Genie",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 1,
+            "width": 6,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "genie_por_sku",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_genie",
+                  "fields": [
+                    {
+                      "name": "sku_name",
+                      "expression": "`sku_name`"
+                    },
+                    {
+                      "name": "sum(custo_usd)",
+                      "expression": "SUM(`custo_usd`)"
+                    },
+                    {
+                      "name": "area",
+                      "expression": "`area`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "sum(custo_usd)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Custo (US$)",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "sku_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "displayName": "sku_name"
+                },
+                "color": {
+                  "fieldName": "area",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "area"
+                }
+              },
+              "frame": {
+                "title": "Custo por SKU",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "genie_por_area",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_genie",
+                  "fields": [
+                    {
+                      "name": "area",
+                      "expression": "`area`"
+                    },
+                    {
+                      "name": "sum(custo_usd)",
+                      "expression": "SUM(`custo_usd`)"
+                    },
+                    {
+                      "name": "surface",
+                      "expression": "`surface`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "sum(custo_usd)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Custo (US$)",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "area",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "displayName": "area"
+                },
+                "color": {
+                  "fieldName": "surface",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "surface"
+                }
+              },
+              "frame": {
+                "title": "Custo por área",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 4,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "genie_diario",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_genie",
+                  "fields": [
+                    {
+                      "name": "daily(data)",
+                      "expression": "DATE_TRUNC(\"DAY\", `data`)"
+                    },
+                    {
+                      "name": "sum(custo_usd)",
+                      "expression": "SUM(`custo_usd`)"
+                    },
+                    {
+                      "name": "sku_name",
+                      "expression": "`sku_name`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "daily(data)",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Data"
+                },
+                "y": {
+                  "fieldName": "sum(custo_usd)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Custo (US$)",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                },
+                "color": {
+                  "fieldName": "sku_name",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "sku_name"
+                }
+              },
+              "frame": {
+                "title": "Custo diário por SKU",
                 "showTitle": true
               }
             }
@@ -1315,6 +1716,83 @@
             "y": 10,
             "width": 12,
             "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "genie_usuarios",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_genie",
+                  "fields": [
+                    {
+                      "name": "usuario",
+                      "expression": "`usuario`"
+                    },
+                    {
+                      "name": "sum(custo_usd)",
+                      "expression": "SUM(`custo_usd`)"
+                    },
+                    {
+                      "name": "surface",
+                      "expression": "`surface`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "sum(custo_usd)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Custo (US$)",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "usuario",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "displayName": "usuario"
+                },
+                "color": {
+                  "fieldName": "surface",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "surface"
+                }
+              },
+              "frame": {
+                "title": "Custo por usuário",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 16,
+            "width": 12,
+            "height": 7
           }
         }
       ]
@@ -1343,9 +1821,9 @@
                 }
               },
               {
-                "name": "ds_custo_genai_data",
+                "name": "ds_genai_data",
                 "query": {
-                  "datasetName": "ds_custo_genai",
+                  "datasetName": "ds_genai",
                   "fields": [
                     {
                       "name": "data",
@@ -1356,9 +1834,9 @@
                 }
               },
               {
-                "name": "ds_genai_data",
+                "name": "ds_genie_data",
                 "query": {
-                  "datasetName": "ds_genai",
+                  "datasetName": "ds_genie",
                   "fields": [
                     {
                       "name": "data",
@@ -1395,6 +1873,19 @@
                 }
               },
               {
+                "name": "ds_tab_system_ai_area_data",
+                "query": {
+                  "datasetName": "ds_tab_system_ai_area",
+                  "parameters": [
+                    {
+                      "name": "periodo",
+                      "keyword": "periodo"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
                 "name": "ds_tab_system_ai_data",
                 "query": {
                   "datasetName": "ds_tab_system_ai",
@@ -1421,12 +1912,12 @@
                   {
                     "fieldName": "data",
                     "displayName": "Período",
-                    "queryName": "ds_custo_genai_data"
+                    "queryName": "ds_genai_data"
                   },
                   {
                     "fieldName": "data",
                     "displayName": "Período",
-                    "queryName": "ds_genai_data"
+                    "queryName": "ds_genie_data"
                   },
                   {
                     "parameterName": "periodo",
@@ -1435,6 +1926,10 @@
                   {
                     "parameterName": "periodo",
                     "queryName": "ds_tab_usuario_data"
+                  },
+                  {
+                    "parameterName": "periodo",
+                    "queryName": "ds_tab_system_ai_area_data"
                   },
                   {
                     "parameterName": "periodo",
@@ -1473,9 +1968,9 @@
                 }
               },
               {
-                "name": "ds_custo_genai_area",
+                "name": "ds_genai_area",
                 "query": {
-                  "datasetName": "ds_custo_genai",
+                  "datasetName": "ds_genai",
                   "fields": [
                     {
                       "name": "area",
@@ -1486,9 +1981,9 @@
                 }
               },
               {
-                "name": "ds_genai_area",
+                "name": "ds_genie_area",
                 "query": {
-                  "datasetName": "ds_genai",
+                  "datasetName": "ds_genie",
                   "fields": [
                     {
                       "name": "area",
@@ -1538,6 +2033,19 @@
                 }
               },
               {
+                "name": "ds_tab_system_ai_area_area",
+                "query": {
+                  "datasetName": "ds_tab_system_ai_area",
+                  "fields": [
+                    {
+                      "name": "area",
+                      "expression": "`area`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
                 "name": "ds_tab_system_ai_area",
                 "query": {
                   "datasetName": "ds_tab_system_ai",
@@ -1564,12 +2072,12 @@
                   {
                     "fieldName": "area",
                     "displayName": "Área",
-                    "queryName": "ds_custo_genai_area"
+                    "queryName": "ds_genai_area"
                   },
                   {
                     "fieldName": "area",
                     "displayName": "Área",
-                    "queryName": "ds_genai_area"
+                    "queryName": "ds_genie_area"
                   },
                   {
                     "fieldName": "area",
@@ -1585,6 +2093,11 @@
                     "fieldName": "area",
                     "displayName": "Área",
                     "queryName": "ds_tab_usuario_area"
+                  },
+                  {
+                    "fieldName": "area",
+                    "displayName": "Área",
+                    "queryName": "ds_tab_system_ai_area_area"
                   },
                   {
                     "fieldName": "area",
@@ -1624,9 +2137,9 @@
                 }
               },
               {
-                "name": "ds_custo_genai_usuario",
+                "name": "ds_genai_usuario",
                 "query": {
-                  "datasetName": "ds_custo_genai",
+                  "datasetName": "ds_genai",
                   "fields": [
                     {
                       "name": "usuario",
@@ -1637,9 +2150,9 @@
                 }
               },
               {
-                "name": "ds_genai_usuario",
+                "name": "ds_genie_usuario",
                 "query": {
-                  "datasetName": "ds_genai",
+                  "datasetName": "ds_genie",
                   "fields": [
                     {
                       "name": "usuario",
@@ -1689,12 +2202,12 @@
                   {
                     "fieldName": "usuario",
                     "displayName": "Usuário",
-                    "queryName": "ds_custo_genai_usuario"
+                    "queryName": "ds_genai_usuario"
                   },
                   {
                     "fieldName": "usuario",
                     "displayName": "Usuário",
-                    "queryName": "ds_genai_usuario"
+                    "queryName": "ds_genie_usuario"
                   },
                   {
                     "fieldName": "usuario",
@@ -1729,19 +2242,6 @@
                 "name": "ds_custo_produto",
                 "query": {
                   "datasetName": "ds_custo",
-                  "fields": [
-                    {
-                      "name": "produto",
-                      "expression": "`produto`"
-                    }
-                  ],
-                  "disaggregated": false
-                }
-              },
-              {
-                "name": "ds_custo_genai_produto",
-                "query": {
-                  "datasetName": "ds_custo_genai",
                   "fields": [
                     {
                       "name": "produto",
@@ -1787,11 +2287,6 @@
                     "fieldName": "produto",
                     "displayName": "Produto",
                     "queryName": "ds_custo_produto"
-                  },
-                  {
-                    "fieldName": "produto",
-                    "displayName": "Produto",
-                    "queryName": "ds_custo_genai_produto"
                   },
                   {
                     "fieldName": "produto",

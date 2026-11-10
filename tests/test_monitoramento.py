@@ -4,6 +4,7 @@ import monitoramento_lib as mon
 
 RAIZ = os.path.join(os.path.dirname(__file__), "..")
 TEMPLATE = os.path.join(RAIZ, "monitoramento", "dashboard_custos.lvdash.json")
+TEMPLATE_AREA = os.path.join(RAIZ, "monitoramento", "dashboard_area.lvdash.json")
 
 
 class FakeApi:
@@ -91,8 +92,11 @@ class TestViews(unittest.TestCase):
         self.assertIn("LEFT JOIN c.m.cad_areas a ON a.budget = b.custom_tags['budget']", v["vw_custo"])
         self.assertIn("LEFT JOIN c.m.cad_areas a ON a.budget = g.service_tags['budget']", v["vw_genai"])
         for nome in ("vw_custo", "vw_genai"):
-            self.assertNotIn("WITH", v[nome])     # views simples: uma junção, sem CTEs
-            self.assertIn("is_account_group_member(a.grupo)", v[nome])
+            self.assertNotIn("WITH", v[nome])     # views simples: junções diretas, sem CTEs
+        self.assertIn("is_account_group_member(coalesce(a.grupo, m.grupo))", v["vw_genai"])
+        self.assertIn("LEFT JOIN c.m.cad_membros m ON g.endpoint_name LIKE 'system.ai.%'", v["vw_genai"])
+        self.assertIn("b.endpoint LIKE 'system.ai.%'", v["vw_custo"])
+        self.assertIn("is_account_group_member(coalesce(a.grupo, m.grupo))", v["vw_custo"])
 
     def test_grupo_admin_opcional(self):
         self.assertEqual(mon.admin_expr(""), "is_member('admins')")
@@ -156,11 +160,12 @@ class TestDashboard(unittest.TestCase):
         self.assertFalse(any(c[0] == "PATCH" and "/lakeview/" in c[1] for c in api.calls))   # conteúdo igual
         self.assertTrue(any(c[0] == "POST" and c[1].endswith("/published") for c in api.calls))
 
-    def test_modelo_do_repositorio(self):
-        texto = open(TEMPLATE, encoding="utf-8").read()
+    def _valida_modelo(self, caminho, area=None):
+        texto = open(caminho, encoding="utf-8").read()
         self.assertIn(mon.PLACEHOLDER_SCHEMA, texto)
         self.assertIn(mon.PLACEHOLDER_TITULO, texto)
-        d = json.loads(mon.render_dashboard(texto, "c.m", "T"))
+        d = json.loads(mon.render_dashboard(texto, "c.m", "T", area))
+        self.assertNotIn("__", json.dumps(d))                         # nenhum marcador sobrando
         datasets = {ds["name"] for ds in d["datasets"]}
         for ds in d["datasets"]:
             sql = "".join(ds["queryLines"])
@@ -177,21 +182,47 @@ class TestDashboard(unittest.TestCase):
                     pos = item["position"]
                     linhas[pos["y"]] = linhas.get(pos["y"], 0) + pos["width"]
             self.assertTrue(all(v == 12 for v in linhas.values()), (p["name"], linhas))
+        return d
+
+    def test_modelo_geral(self):
+        d = self._valida_modelo(TEMPLATE)
+        filtros = [w["widget"]["name"] for p in d["pages"] if p["pageType"] == "PAGE_TYPE_GLOBAL_FILTERS" for w in p["layout"]]
+        self.assertIn("f_area", filtros)
+
+    def test_modelo_da_area_so_tem_a_area(self):
+        self.assertIn(mon.PLACEHOLDER_AREA, open(TEMPLATE_AREA, encoding="utf-8").read())
+        d = self._valida_modelo(TEMPLATE_AREA, "financas")
+        for ds in d["datasets"]:
+            self.assertIn("WHERE area = 'financas'", "".join(ds["queryLines"]), ds["name"])
+        filtros = [w["widget"]["name"] for p in d["pages"] if p["pageType"] == "PAGE_TYPE_GLOBAL_FILTERS" for w in p["layout"]]
+        self.assertNotIn("f_area", filtros)
+        self.assertNotIn("Por área", [p["displayName"] for p in d["pages"]])
+
+    def test_tag_com_aspas_no_sql(self):
+        d = json.loads(mon.render_dashboard(open(TEMPLATE_AREA, encoding="utf-8").read(), "c.m", 'T "x"', "fin'x"))
+        self.assertIn("WHERE area = 'fin\\'x'", "".join(d["datasets"][0]["queryLines"]))
 
 
 class TestAreas(unittest.TestCase):
-    def test_parse_ok(self):
-        areas, erros = mon.parse_areas(" financas=fin_users=wh_financas ,\nriscos = risco_users = Serverless Starter Warehouse")
-        self.assertEqual(erros, [])
-        self.assertEqual(areas, [{"tag": "financas", "grupo": "fin_users", "warehouse": "wh_financas"},
-                                 {"tag": "riscos", "grupo": "risco_users", "warehouse": "Serverless Starter Warehouse"}])
+    CSV = ("grupo,emails,schema,warehouse,modelos,usage_policy,budget,tpm,qpm\n"
+           "fin_users,a@x.com,financas,wh_financas,gpt-5-mini,exp_fin,foundationlab,,\n"
+           "risco_users,b@x.com,riscos,wh_riscos,,,,,\n")
 
-    def test_parse_erros(self):
-        _, erros = mon.parse_areas("financas=fin_users, a=b=c, a=d=e")
-        texto = " | ".join(erros)
-        self.assertIn("use tag=grupo=warehouse", texto)
-        self.assertIn("tag 'a' repetida", texto)
-        self.assertIn("ao menos uma área", mon.parse_areas("")[1][0])
+    def test_csv_do_onboarding(self):
+        areas, erros = mon.areas_do_csv("\ufeff" + self.CSV)
+        self.assertEqual(erros, [])
+        self.assertEqual(areas, [{"tag": "foundationlab", "grupo": "fin_users", "warehouse": "wh_financas"},
+                                 {"tag": "risco_users", "grupo": "risco_users", "warehouse": "wh_riscos"}])  # budget vazio = grupo
+
+    def test_budget_repetido_e_erro(self):
+        _, erros = mon.areas_do_csv(self.CSV + "outro,c@x.com,s,wh_x,,,foundationlab,,\n")
+        self.assertEqual(len(erros), 1)
+        self.assertIn("budget 'foundationlab' já é do grupo fin_users", erros[0])
+
+    def test_colunas_e_warehouse(self):
+        self.assertIn("colunas ausentes", mon.areas_do_csv("grupo,emails\nx,a@x.com\n")[1][0])
+        self.assertIn("sem warehouse", mon.areas_do_csv("grupo,warehouse,budget\nx,,t\n")[1][0])
+        self.assertIn("CSV sem grupos", mon.areas_do_csv("grupo,warehouse\n")[1][0])
 
     AREAS = [{"tag": "financas", "grupo": "fin", "warehouse": "wh", "warehouse_id": "w1"}]
 
@@ -243,3 +274,60 @@ class TestGrantGrupoNovo(unittest.TestCase):
                 raise mon.ApiError("Could not find principal with name g.")
             return {}
         self.assertEqual(mon.ensure_grant(api, "table", "c.m.vw", "g", ["SELECT"], False)[0], "criaria")
+
+
+class TestMembros(unittest.TestCase):
+    def _api(self):
+        grupos = {"fin": "g1", "risco": "g2"}
+        membros = {"g1": [("USER", 1), ("GROUP", "g3"), ("SERVICE_PRINCIPAL", 9)],
+                   "g2": [("USER", 2), ("USER", 1)],
+                   "g3": [("USER", 3), ("GROUP", "g1")]}   # ciclo: g3 contém g1
+        users = {1: "Ana@x.com", 2: "bia@x.com", 3: "caio@x.com"}
+
+        def api(m, p, b=None):
+            if p.startswith("/api/2.0/identity/groups?filter="):
+                nome = [n for n in grupos if f"%22{n}%22" in p][0]
+                return {"groups": [{"group_id": grupos[nome]}]}
+            if "/direct-members" in p:
+                gid = p.split("/")[5]
+                return {"direct_group_members": [{"principal_type": t, "principal_id": i} for t, i in membros[gid]]}
+            if p.startswith("/api/2.0/identity/users/"):
+                return {"username": users[int(p.rsplit("/", 1)[1])]}
+            if p.startswith("/api/2.0/identity/service-principals/"):
+                return {"application_id": "APP-9"}
+            raise AssertionError(p)
+        return api
+
+    def test_grupo_aninhado_sp_e_ciclo(self):
+        self.assertEqual(mon.membros_do_grupo(self._api(), "g1"), {"ana@x.com", "caio@x.com", "app-9"})
+
+    def test_usuario_em_duas_areas_fica_sem_budget(self):
+        areas = [{"tag": "financas", "grupo": "fin"}, {"tag": "riscos", "grupo": "risco"}]
+        linhas = {r["usuario"]: r for r in mon.membros_por_usuario(self._api(), areas)}
+        self.assertEqual((linhas["ana@x.com"]["budget"], linhas["ana@x.com"]["n_areas"]), (None, 2))
+        self.assertEqual(linhas["bia@x.com"]["budget"], "riscos")
+        self.assertEqual(linhas["caio@x.com"]["budget"], "financas")
+
+    def test_ensure_membros(self):
+        executados = []
+        linhas = [{"usuario": "a@x.com", "budget": "financas", "grupo": "fin", "n_areas": 1}]
+        q = lambda stmt: [dict(linhas[0])]
+        self.assertEqual(mon.ensure_membros(q, executados.append, "c.m", linhas, "adm", True, True)[0], "existe")
+        self.assertEqual(mon.ensure_membros(None, executados.append, "c.m", linhas, "adm", False, False)[0], "criaria")
+        self.assertEqual(executados, [])
+        self.assertEqual(mon.ensure_membros(None, executados.append, "c.m", [], "adm", False, True)[0], "criado")
+        self.assertEqual(len(executados), 1)   # tabela vazia: só o CREATE
+
+    def test_genie_pelo_usuario_na_view(self):
+        v = mon.view_definitions("c.m", "budget", "")["vw_custo"]
+        self.assertIn("LEFT JOIN c.m.cad_membros m ON (b.produto = 'GENIE' OR b.endpoint LIKE 'system.ai.%')", v)
+        self.assertIn("coalesce(a.budget, m.budget) AS area", v)
+
+
+class TestGrantObjetoNovo(unittest.TestCase):
+    def test_simular_com_schema_ainda_inexistente(self):
+        def api(m, p, b=None):
+            if m == "GET":
+                raise mon.ApiError("Schema 'c.monitoramento' does not exist.", error_code="SCHEMA_DOES_NOT_EXIST")
+            return {}
+        self.assertEqual(mon.ensure_grant(api, "schema", "c.monitoramento", "g", ["USE_SCHEMA"], False)[0], "criaria")
